@@ -146,6 +146,12 @@ as a *second* auth path for temporary credentials, once signing works.
 **Known hazard:** clock skew and canonicalisation bugs both surface as an opaque 403. The front door
 returns which check failed when `DARIYA_DEV=1`, or an evening goes to a trailing slash.
 
+**Known gap (M1.4), stated rather than hidden:** the `Host` header is not signed, so a signature is
+valid against any endpoint sharing the credential scope's region and service. With one front door
+there is nowhere else to replay it to. It becomes real the moment a second endpoint serves the same
+scope, and the fix is one more line in the canonical string — plus the operational cost that made
+AWS invent `SignedHeaders`, which is that every proxy rewriting `Host` breaks every signature.
+
 ### 6. The front door decides authz; the request carries a capability. ★
 
 The decision this repo exists to demonstrate.
