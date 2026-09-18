@@ -17,6 +17,7 @@ import (
 	"dariyanws/internal/apierr"
 	"dariyanws/internal/arn"
 	"dariyanws/internal/page"
+	"dariyanws/internal/secrets"
 	"dariyanws/internal/store"
 )
 
@@ -38,19 +39,20 @@ type Clock func() time.Time
 type AccountsServer struct {
 	controlv1.UnimplementedAccountsServiceServer
 
-	store *store.Store
-	now   Clock
+	store   *store.Store
+	now     Clock
+	keyring *secrets.Keyring
 
 	// region is stamped into the principal ARNs this service mints. Pinned today (DESIGN.md
 	// decision 4), a field rather than a constant so a second region is configuration.
 	region string
 }
 
-func NewAccountsServer(st *store.Store, region string, now Clock) *AccountsServer {
+func NewAccountsServer(st *store.Store, kr *secrets.Keyring, region string, now Clock) *AccountsServer {
 	if now == nil {
 		now = time.Now
 	}
-	return &AccountsServer{store: st, now: now, region: region}
+	return &AccountsServer{store: st, keyring: kr, now: now, region: region}
 }
 
 // CreateAccount allocates a tenant.

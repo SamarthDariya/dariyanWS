@@ -9,6 +9,7 @@ import (
 	controlv1 "dariyanws/gen/dariya/control/v1"
 	"dariyanws/internal/apierr"
 	"dariyanws/internal/arn"
+	"dariyanws/internal/secrets"
 	"dariyanws/internal/store"
 )
 
@@ -28,7 +29,7 @@ func newTestServer(t *testing.T) *AccountsServer {
 		`TRUNCATE access_keys, accounts, idempotency`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
-	return NewAccountsServer(st, testRegion, fixedClock(1_700_000_000_000))
+	return NewAccountsServer(st, testKeyring(t), testRegion, fixedClock(1_700_000_000_000))
 }
 
 func TestCreateAccount(t *testing.T) {
@@ -178,4 +179,19 @@ func TestListAccountsPaginates(t *testing.T) {
 			t.Errorf("account %s never appeared in a page", id)
 		}
 	}
+}
+
+// testKeyring gives each test a fresh master key. Rows do not survive between tests (the table is
+// truncated), so there is nothing for a previous key to have encrypted.
+func testKeyring(t *testing.T) *secrets.Keyring {
+	t.Helper()
+	key, err := secrets.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	kr, err := secrets.NewKeyring(map[string][]byte{"test": key}, "test")
+	if err != nil {
+		t.Fatalf("NewKeyring: %v", err)
+	}
+	return kr
 }

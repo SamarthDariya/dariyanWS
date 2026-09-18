@@ -53,8 +53,12 @@ region-down:
 region-nuke:
 	docker compose -f deploy/docker-compose.yml down -v
 
+## dev-keys: print a master key line for local use — secrets are encrypted at rest, not hashed
+dev-keys:
+	@echo "export DARIYA_MASTER_KEYS=dev1:$$(openssl rand -base64 32)"
+
 ## dev-token: mint signed credentials for the seeded dev account (M1)
 dev-token:
 	@echo "not yet — M1. See DESIGN.md decision 4: multi-account means nothing works without a principal."
 
-.PHONY: help tools proto lint breaking build test test-integration region-up region-down region-nuke dev-token
+.PHONY: help tools proto lint breaking build test test-integration region-up region-down region-nuke dev-keys dev-token
