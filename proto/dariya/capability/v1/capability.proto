@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+// The capability token: the front door's authorisation decision, made portable.
+//
+// This is DESIGN.md decision 6, the decision this repo exists to demonstrate. The front door
+// verifies a signature, asks IAM once, and on allow mints one of these. The service holds only the
+// Ed25519 *public* key and verifies offline — no network call to anything in dariyanWS on the data
+// path. That is what makes "kill the control plane, watch the data plane keep serving" a real
+// demonstration rather than a claim.
+package dariya.capability.v1;
+
+option go_package = "dariyanws/gen/dariya/capability/v1;capabilityv1";
+
+// What the bearer is permitted to do. One action, one resource, one request — deliberately not a
+// bundle of permissions. A token is minted per request and dies in 30 seconds; it is a receipt for
+// a decision already made, not a credential.
+message Capability {
+  // Owner of the resource being acted on, and the account the caller authenticated as. Cross-account
+  // access shows up as these two differing, which is why caller_account_id exists separately.
+  string account_id = 1;
+
+  // The verified caller. arn:dariya:iam:hind-1:000000000001:user/samarth
+  string principal_arn = 2;
+
+  // Service-qualified, exactly as written in policy: "func:Invoke", "kyu:SendMessage".
+  //
+  // The service MUST check this against the operation it was actually asked to perform. A service
+  // that verifies the signature and ignores this field turns any valid token into a skeleton key
+  // for that service. M4 plants that bug on purpose and ships the test that catches it.
+  string action = 3;
+
+  // The specific resource. Not a wildcard — wildcards are a thing policies contain, not a thing
+  // tokens contain. By the time a token exists the wildcard has been resolved against a concrete
+  // request, and the service compares this for equality.
+  string resource_arn = 4;
+
+  // Ties the token to one request, for tracing and for narrowing replay.
+  string request_id = 5;
+
+  // Account the credentials belonged to. Equals account_id except on cross-account access.
+  string caller_account_id = 6;
+
+  int64 issued_at_unix_ms = 7;
+
+  // Short. 30 seconds by default.
+  //
+  // This bound is also the revocation window, and it is the accepted cost of decision 6: delete a
+  // policy and the caller keeps access until every already-minted token expires. AWS lives with the
+  // same property under the name "IAM propagation delay".
+  int64 expires_at_unix_ms = 8;
+}
+
+// What actually travels on the wire, as a gRPC metadata header.
+//
+// The signature covers `capability_bytes`, not a re-serialisation of the Capability message.
+// Protobuf serialisation is not canonical — field ordering and varint encoding are free to differ
+// between implementations and versions — so a verifier that re-encodes a parsed message may compute
+// a different byte string than the signer did and reject a valid token. The signer's exact bytes
+// are therefore carried verbatim, and the verifier checks the signature against those bytes *before*
+// parsing them. This is the single most likely source of a cross-language (Go signer, C++ verifier)
+// bug in the whole system.
+message SignedCapability {
+  // Serialised Capability, exactly as signed.
+  bytes capability_bytes = 1;
+
+  // Ed25519 signature over capability_bytes.
+  bytes signature = 2;
+
+  // Which front-door signing key was used. Present so keys can be rotated with an overlap window:
+  // services keep a small map of key_id -> public key and accept any of them.
+  string key_id = 3;
+}

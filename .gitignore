@@ -1,0 +1,14 @@
+# Build output
+/bin/
+/dist/
+
+# Generated from proto/ — regenerate with `make proto`.
+# Checked OUT of the tree on purpose: generated code in review diffs hides the change that caused it.
+/gen/
+
+# Local state
+*.env
+.env
+/deploy/pgdata/
+
+.DS_Store

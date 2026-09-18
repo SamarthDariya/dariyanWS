@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+// Accounts and credentials — the two things dariyanWS does own.
+//
+// DESIGN.md decision 1 says this repo owns no resources. Accounts and access keys are the exception
+// that proves it: they are not resources *in* the cloud, they are the tenancy the cloud is divided
+// into and the keys that prove membership. Nothing else lives here.
+package dariya.control.v1;
+
+import "dariya/common/v1/common.proto";
+
+option go_package = "dariyanws/gen/dariya/control/v1;controlv1";
+
+service AccountsService {
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
+
+  rpc CreateAccessKey(CreateAccessKeyRequest) returns (CreateAccessKeyResponse);
+  rpc ListAccessKeys(ListAccessKeysRequest) returns (ListAccessKeysResponse);
+  rpc DeleteAccessKey(DeleteAccessKeyRequest) returns (DeleteAccessKeyResponse);
+}
+
+message Account {
+  // Twelve digits, zero-padded, allocated by this service. Appears in every ARN and every storage
+  // key in every service (DESIGN.md decision 4).
+  string account_id = 1;
+
+  string name = 2;
+
+  dariya.common.v1.ResourceState state = 3;
+
+  int64 created_at_unix_ms = 4;
+}
+
+// A long-lived credential. The secret exists in exactly one response, at creation, and is never
+// retrievable again — stored only as a hash, so a dump of the credentials table does not let the
+// holder sign anything.
+//
+// Long-lived keys are the M1 credential. Temporary credentials from an STS-alike arrive later as a
+// second auth path (DESIGN.md decision 5).
+message AccessKey {
+  // Public half. Travels in the Authorization header in cleartext; it is how the front door knows
+  // which secret to look up. "DARIYAKEY" + 16 chars, so it is greppable in logs and obviously not
+  // the secret.
+  string access_key_id = 1;
+
+  string account_id = 2;
+
+  // Which identity this key authenticates as.
+  string principal_arn = 3;
+
+  dariya.common.v1.ResourceState state = 4;
+
+  int64 created_at_unix_ms = 5;
+
+  // Populated only in CreateAccessKeyResponse, never in a list or get. Never logged.
+  string secret_access_key = 6;
+}
+
+message CreateAccountRequest {
+  string name = 1;
+  string client_token = 2;
+}
+message CreateAccountResponse { Account account = 1; }
+
+message GetAccountRequest { string account_id = 1; }
+message GetAccountResponse { Account account = 1; }
+
+message ListAccountsRequest { dariya.common.v1.PageRequest page = 1; }
+message ListAccountsResponse {
+  repeated Account accounts = 1;
+  dariya.common.v1.PageResponse page = 2;
+}
+
+message CreateAccessKeyRequest {
+  string account_id = 1;
+  string principal_arn = 2;
+  string client_token = 3;
+}
+// The only message that ever carries a secret.
+message CreateAccessKeyResponse { AccessKey access_key = 1; }
+
+message ListAccessKeysRequest {
+  string account_id = 1;
+  dariya.common.v1.PageRequest page = 2;
+}
+message ListAccessKeysResponse {
+  // secret_access_key is always empty here.
+  repeated AccessKey access_keys = 1;
+  dariya.common.v1.PageResponse page = 2;
+}
+
+message DeleteAccessKeyRequest { string access_key_id = 1; }
+message DeleteAccessKeyResponse {}

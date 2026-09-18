@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+// Types every dariyanWS service shares. Nothing service-specific may land here — if it only makes
+// sense for queues or only for functions, it belongs in that service's own proto.
+//
+// See DESIGN.md decision 3: this package is the contract, and it is generated into Go, C++ and
+// TypeScript rather than hand-copied.
+package dariya.common.v1;
+
+option go_package = "dariyanws/gen/dariya/common/v1;commonv1";
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+// The error shape for every API in every service, at the edge and internally.
+//
+// `code` is contract and is stable forever; `message` is for humans and may change freely. Clients
+// branch on `code`, never on `message`, and never on the HTTP status — the status is advisory.
+message Error {
+  // Stable machine-readable code. e.g. "ResourceNotFound", "AccessDenied", "ThrottlingException",
+  // "ValidationException", "InvalidSignature", "SignatureExpired".
+  string code = 1;
+
+  // Human-readable. Not contract. Not parsed.
+  string message = 2;
+
+  // Minted at the front door, propagated on every internal hop, present on every response and every
+  // error. The only way a five-service path is debuggable. See DESIGN.md Part II.
+  string request_id = 3;
+
+  // Optional structured context: which field failed validation, which check rejected a signature.
+  // Populated with signature-check detail only when the front door runs with DARIYA_DEV=1, because
+  // saying exactly why a signature failed is a gift to an attacker in production and a necessity
+  // during development (DESIGN.md decision 5).
+  map<string, string> details = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Resource lifecycle
+// ---------------------------------------------------------------------------
+
+// Every resource in every service moves through these states, and every Describe* exposes it.
+//
+// This lives in the shared contract even though dariyanWS owns no resources (DESIGN.md decision 1):
+// the states are contract precisely so that the console and the future orchestrator (decision 8) can
+// poll any service's resource without knowing what it is.
+enum ResourceState {
+  RESOURCE_STATE_UNSPECIFIED = 0;
+
+  // Accepted and durably recorded, not yet usable. The API returned success; the resource has not
+  // finished being real. Callers poll.
+  RESOURCE_STATE_CREATING = 1;
+
+  // Usable.
+  RESOURCE_STATE_ACTIVE = 2;
+
+  // Usable, with a change in flight.
+  RESOURCE_STATE_UPDATING = 3;
+
+  // Accepted for deletion, not yet gone. Still occupies its name.
+  RESOURCE_STATE_DELETING = 4;
+
+  // Terminal. The service could not make the record true and has stopped trying. Carries a reason.
+  RESOURCE_STATE_FAILED = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+// `next_token` is deliberately opaque: it is a base64 blob whose interior is the service's business.
+// Today it may be a primary key; tomorrow it may be an encrypted cursor plus a snapshot id. Clients
+// that cannot read it cannot depend on it, so it can change without a contract break.
+message PageRequest {
+  // Server may return fewer. Zero means "server default".
+  int32 max_results = 1;
+
+  // Empty on the first call. Echo back what the previous response returned.
+  string next_token = 2;
+}
+
+message PageResponse {
+  // Empty when the listing is exhausted. An empty page with a non-empty token is legal — callers
+  // must loop on the token, not on the page being non-empty.
+  string next_token = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+// Who is making a call, after the front door has verified a signature and resolved it.
+//
+// Note that this is *resolved* identity: by the time a Principal exists, the request's signature has
+// already been checked. Services never construct one from request headers; they read it out of a
+// verified capability token (DESIGN.md decision 6).
+message Principal {
+  // Twelve digits, zero-padded. In the ARN and in every storage key, from the first commit
+  // (DESIGN.md decision 4).
+  string account_id = 1;
+
+  // arn:dariya:iam:hind-1:000000000001:user/samarth
+  // arn:dariya:iam:hind-1:000000000001:role/event-source-poller
+  string principal_arn = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+// The envelope an event source mapping wraps around anything it delivers (DESIGN.md decision 7).
+//
+// Service-neutral by construction: a queue message, an object-created notification and a timer tick
+// all arrive in this shape, and `payload` is opaque bytes that only the invoked function interprets.
+// If a field here ever needs to know which service produced the event, the envelope is wrong.
+message EventEnvelope {
+  // Unique per event, stable across retries of the same event. This is the key a function uses to
+  // deduplicate, because delivery is at-least-once.
+  string event_id = 1;
+
+  // The resource that produced it. e.g. arn:dariya:kyu:hind-1:000000000001:queue/orders
+  string source_arn = 2;
+
+  // Owner of the source. Carried explicitly rather than parsed out of source_arn, so that a consumer
+  // never has to parse an ARN to do an authorisation check.
+  string account_id = 3;
+
+  // When the source produced it — not when it was delivered. The gap between the two is the poll
+  // latency that DESIGN.md decision 7 accepts and BREAK.md has to measure.
+  int64 occurred_at_unix_ms = 4;
+
+  // The request id of the delivery attempt, so an invoke can be traced back to a poll.
+  string request_id = 5;
+
+  // Opaque to everything except the function.
+  bytes payload = 6;
+
+  // Which delivery attempt this is, starting at 1. A function that cares about duplicates checks
+  // event_id; a function that cares about poison messages checks this.
+  int32 attempt = 7;
+}

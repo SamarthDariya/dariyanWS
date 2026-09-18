@@ -1,0 +1,28 @@
+# "The region" — one command, whole cloud (DESIGN.md Part III).
+#
+# M0 boots only the control-plane store. The front door joins at M2, IAM at M3, and each service
+# repo contributes its own compose fragment as it comes online. Region name is pinned to hind-1
+# (DESIGN.md decision 4).
+name: dariya-hind-1
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: dariya-postgres
+    environment:
+      POSTGRES_USER: dariya
+      POSTGRES_PASSWORD: dariya
+      POSTGRES_DB: dariyanws
+    ports:
+      # Non-default host port: a local Postgres on 5432 is common and the collision is confusing.
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dariya -d dariyanws"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:

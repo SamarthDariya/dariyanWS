@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+// Identity and access management: the one place policy is written and evaluated.
+//
+// IAM is centrally defined and, per DESIGN.md decision 6, centrally *decided* as well — the front
+// door calls Authorize once per request and hands the result onward as a capability token. Services
+// never call this API on their data path.
+package dariya.iam.v1;
+
+import "dariya/common/v1/common.proto";
+
+option go_package = "dariyanws/gen/dariya/iam/v1;iamv1";
+
+service IamService {
+  // The hot path. Called once per request by the front door, before anything is proxied.
+  rpc Authorize(AuthorizeRequest) returns (AuthorizeResponse);
+
+  rpc CreatePolicy(CreatePolicyRequest) returns (CreatePolicyResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+  rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
+
+  rpc AttachPolicy(AttachPolicyRequest) returns (AttachPolicyResponse);
+  rpc DetachPolicy(DetachPolicyRequest) returns (DetachPolicyResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Policy documents
+// ---------------------------------------------------------------------------
+
+enum Effect {
+  EFFECT_UNSPECIFIED = 0;
+  EFFECT_ALLOW = 1;
+  EFFECT_DENY = 2;
+}
+
+// One rule. Actions and resources support a trailing "*" and nothing more elaborate — the full IAM
+// wildcard and condition language is a research project of its own, and the interesting part of
+// authorisation is the evaluation order, not the glob syntax.
+message Statement {
+  // Optional label, echoed in AuthorizeResponse so a denial can be traced to the rule that caused
+  // it. Debuggability of authorisation decisions is worth one string.
+  string sid = 1;
+
+  Effect effect = 2;
+
+  // "func:Invoke", "kyu:*", "*"
+  repeated string actions = 3;
+
+  // "arn:dariya:func:hind-1:000000000001:function/*", "*"
+  repeated string resources = 4;
+}
+
+message PolicyDocument {
+  // Dated version string, as AWS does it. Present so the evaluation rules themselves can change
+  // without silently reinterpreting policies written against the old ones.
+  string version = 1;
+  repeated Statement statements = 2;
+}
+
+message Policy {
+  string policy_arn = 1;
+  string account_id = 2;
+  string name = 3;
+  PolicyDocument document = 4;
+  int64 created_at_unix_ms = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Authorize
+// ---------------------------------------------------------------------------
+
+message AuthorizeRequest {
+  // The verified caller, as resolved from the signature.
+  dariya.common.v1.Principal principal = 1;
+
+  // What is being attempted, concretely. No wildcards.
+  string action = 2;
+  string resource_arn = 3;
+
+  // For tracing the decision back to the request that caused it.
+  string request_id = 4;
+
+  // Free-form facts an evaluator may one day condition on: source IP, TLS state, time of day.
+  // Carried from M3 so that adding conditions later is not a contract break.
+  map<string, string> context = 5;
+}
+
+enum Decision {
+  DECISION_UNSPECIFIED = 0;
+
+  DECISION_ALLOW = 1;
+
+  // A statement matched and said Deny. Deny always wins, regardless of any allow.
+  DECISION_EXPLICIT_DENY = 2;
+
+  // Nothing matched. The default, and the reason a new account can do nothing at all.
+  DECISION_IMPLICIT_DENY = 3;
+}
+
+message AuthorizeResponse {
+  Decision decision = 1;
+
+  // Which policy and statement decided it. Empty on implicit deny, because nothing did.
+  string matched_policy_arn = 2;
+  string matched_sid = 3;
+
+  // Human-readable explanation. Never parsed, and only populated in full detail under DARIYA_DEV=1:
+  // in production, telling a caller precisely why they were denied describes the policy to someone
+  // who is not allowed to read it.
+  string reason = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Policy CRUD
+// ---------------------------------------------------------------------------
+
+message CreatePolicyRequest {
+  string account_id = 1;
+  string name = 2;
+  PolicyDocument document = 3;
+
+  // Idempotency. Retries are coming whether or not they are planned for; a client that times out and
+  // retries must not end up with two policies. Deduplicated for a bounded window.
+  string client_token = 4;
+}
+message CreatePolicyResponse { Policy policy = 1; }
+
+message GetPolicyRequest { string policy_arn = 1; }
+message GetPolicyResponse { Policy policy = 1; }
+
+message ListPoliciesRequest {
+  string account_id = 1;
+  dariya.common.v1.PageRequest page = 2;
+}
+message ListPoliciesResponse {
+  repeated Policy policies = 1;
+  dariya.common.v1.PageResponse page = 2;
+}
+
+message DeletePolicyRequest { string policy_arn = 1; }
+message DeletePolicyResponse {}
+
+// ---------------------------------------------------------------------------
+// Attachment
+// ---------------------------------------------------------------------------
+
+message AttachPolicyRequest {
+  string policy_arn = 1;
+  // Identity the policy is attached to.
+  string principal_arn = 2;
+}
+message AttachPolicyResponse {}
+
+message DetachPolicyRequest {
+  string policy_arn = 1;
+  string principal_arn = 2;
+}
+message DetachPolicyResponse {}

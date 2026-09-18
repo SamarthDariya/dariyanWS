@@ -1,0 +1,15 @@
+# Codegen for the Go side of the contract. C++ and TypeScript outputs get added when there is a
+# consumer for them: C++ at the first service that must verify a capability token, TypeScript at the
+# console. Generating outputs nothing reads is how a contract rots unnoticed.
+version: v2
+inputs:
+  - directory: proto
+managed:
+  enabled: true
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen
+    opt: paths=source_relative
