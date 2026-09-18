@@ -34,8 +34,12 @@ message Account {
 }
 
 // A long-lived credential. The secret exists in exactly one response, at creation, and is never
-// retrievable again — stored only as a hash, so a dump of the credentials table does not let the
-// holder sign anything.
+// retrievable through this API again.
+//
+// It is stored ENCRYPTED, not hashed (DESIGN.md decision 10). Verifying a signature means
+// recomputing the HMAC, which requires the secret itself back; a one-way hash cannot do it. The
+// weaker but honest claim: a dump of this table alone does not yield signing keys, because the
+// master key lives elsewhere.
 //
 // Long-lived keys are the M1 credential. Temporary credentials from an STS-alike arrive later as a
 // second auth path (DESIGN.md decision 5).

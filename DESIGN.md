@@ -211,6 +211,24 @@ Left empty on purpose. The contract is currently validated by exactly one consum
 nothing. When `dariyafunc` is joined by service number two, whatever the contract got wrong gets
 written here rather than quietly patched.
 
+### 10. Access key secrets are encrypted at rest, not hashed.
+
+Amendment, forced during M1 by writing the schema. `account.proto` originally said secrets were
+stored as a hash, and that cannot work: verifying a signature means **recomputing** the HMAC, which
+requires the secret itself. A hash is one-way. That comment described a password store; this is a
+signing store, and the two have opposite requirements.
+
+So: AES-256-GCM, per-row nonce, under a master key the front door holds and the database does not.
+`master_key_id` is stored alongside so the master key can be rotated with an overlap window.
+
+The security claim is genuinely weaker than hashing would have been, and is worth stating plainly
+rather than glossing: **a database dump alone does not yield signing keys; a dump plus the master
+key does.** Password stores can do better than this because they never need the plaintext back.
+Signing-key stores cannot, which is why AWS-style systems do the same thing.
+
+The master key comes from the environment for now. A real KMS-alike — key hierarchy, rotation,
+audit — is a service in its own right and is not being smuggled into M1.
+
 ---
 
 ## Part II — Consequences worth stating up front

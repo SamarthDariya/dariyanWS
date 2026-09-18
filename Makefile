@@ -32,9 +32,14 @@ breaking:
 build:
 	go build -o bin/ ./cmd/...
 
-## test: run the Go tests
+## test: run the Go tests (integration tests skip if the region is not up)
 test:
 	go test ./...
+
+## test-integration: run the Go tests with the region up, refusing to skip
+test-integration: region-up
+	@until docker exec dariya-postgres pg_isready -U dariya -d dariyanws >/dev/null 2>&1; do sleep 0.5; done
+	go test ./... -count=1
 
 ## region-up: boot the region (Postgres now; front door from M2)
 region-up:
@@ -52,4 +57,4 @@ region-nuke:
 dev-token:
 	@echo "not yet — M1. See DESIGN.md decision 4: multi-account means nothing works without a principal."
 
-.PHONY: help tools proto lint breaking build test region-up region-down region-nuke dev-token
+.PHONY: help tools proto lint breaking build test test-integration region-up region-down region-nuke dev-token
