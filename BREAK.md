@@ -44,24 +44,49 @@ _(written before the run; left blank until E1's setup exists, so it cannot ancho
 because the auth work gets written once.
 
 That is an engineering-effort argument, and it is silently also a latency argument, which has not
-been checked. Every request now pays: signature verification (one HMAC), an IAM `Authorize` round
-trip, a token mint (one Ed25519 sign), and a proxy hop.
+been checked. Every request now pays: signature verification (one HMAC), a Postgres lookup to
+resolve the access key, request-id minting, JSON rendering and an access log line. Ed25519 and the
+IAM call are not in the path yet; they arrive at M3 and M4 and get their own numbers.
 
-**Setup:** `dariyanaap` against the front door fronting an echo service, versus `dariyanaap` against
-the echo service directly. Same hardware, same connection count.
+**Setup:** `clients/cpp/build/bench_frontdoor` — the rig driving correctly signed requests — against
+two targets on loopback, same machine, same request bytes:
+
+- **A, bare:** `cmd/echo`, one handler, no middleware, no database. The control.
+- **B, full:** the front door, authn and all.
+
+Sweep 1, 8 and 64 connections, 2s warm-up, 10s measured. Then a set of in-process Go benchmarks to
+split B's cost between the database, the HMAC, and the plumbing.
+
+### Contamination, declared
+
+The M2.4a smoke run (1 connection, 2s) printed `790 rps, p50 1.245ms` for **B** before any
+prediction was written. Unit 0's lesson was that a number already on the page is an anchor whether
+or not you mean to read it, so: the absolute latency of B is **not** a prediction below, it is
+known. What is still open, and what E2 is actually about, is the **ratio to A** and the **split
+between terms** — neither of which that run revealed.
 
 **Predicted — Samarth:**
+_Deferred to Claude on 2026-09-23 at Samarth's instruction. Recorded rather than left blank,
+because unit 0 found that unpredicted experiments quietly become most of them._
 
-**Predicted — Claude:**
+**Predicted — Claude** (written 2026-09-23, before any run beyond the declared smoke):
+
+1. **Throughput ratio, 1 connection: A is ~8× B.** A bare Go handler on loopback should sit near
+   0.12ms p50, so roughly 8,000 rps against B's known 790.
+2. **Added latency: p50 +1.1ms, p99 +2.2ms.** Almost all of it one Postgres round trip.
+3. **Dominant term: the Postgres lookup, ~85-90% of the added latency.** HMAC-SHA256 over a
+   ~200-byte canonical string is sub-microsecond and will be invisible — call it under 1%. Request
+   id, JSON and the access log together ~10%.
+4. **The ratio narrows as connections rise.** A is latency-bound per connection and B is bound by
+   the pool; at 64 connections I expect the gap to close to ~3-4× rather than widen, and for B's
+   p99 to detach from its p50 once concurrent requests exceed the pool size — which is the
+   `dariyaraah` result (throughput is concurrency ÷ latency) reappearing with the pool as the
+   binding constraint rather than threads.
+5. **B's absolute throughput at 64 connections: ~6,000-9,000 rps**, capped by the default pgx pool.
 
 **Measured:**
 
 **Wrong about:**
-
-**Open sub-question:** Ed25519 signing is the suspicious term — it is the only asymmetric crypto on
-the hot path. If it dominates, the fix is not to abandon decision 6 but to cache tokens per
-(principal, action, resource) for their 30s lifetime, which changes the revocation story not at all
-because the TTL was always the bound.
 
 ---
 
