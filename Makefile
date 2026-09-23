@@ -54,11 +54,17 @@ region-nuke:
 	docker compose -f deploy/docker-compose.yml down -v
 
 ## dev-keys: print a master key line for local use — secrets are encrypted at rest, not hashed
+##           Each run prints a NEW key. Export it once and keep it: credentials minted under a
+##           previous key stop decrypting, which looks exactly like a signing bug.
 dev-keys:
 	@echo "export DARIYA_MASTER_KEYS=dev1:$$(openssl rand -base64 32)"
 
-## dev-token: mint signed credentials for the seeded dev account (M1)
+## dev-token: seed the dev account and mint credentials — `eval "$$(make -s dev-token)"`
 dev-token:
-	@echo "not yet — M1. See DESIGN.md decision 4: multi-account means nothing works without a principal."
+	@test -n "$$DARIYA_MASTER_KEYS" || { \
+		echo "DARIYA_MASTER_KEYS is not set. Run:" >&2; \
+		echo '  eval "$$(make -s dev-keys)"' >&2; \
+		exit 1; }
+	@go run ./cmd/dariyactl bootstrap
 
 .PHONY: help tools proto lint breaking build test test-integration region-up region-down region-nuke dev-keys dev-token
