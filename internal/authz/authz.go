@@ -12,12 +12,17 @@ package authz
 
 import (
 	"context"
+	"encoding/base64"
 	"log/slog"
 	"net/http"
 
+	"google.golang.org/protobuf/proto"
+
+	capabilityv1 "dariyanws/gen/dariya/capability/v1"
 	commonv1 "dariyanws/gen/dariya/common/v1"
 	iamv1 "dariyanws/gen/dariya/iam/v1"
 	"dariyanws/internal/apierr"
+	"dariyanws/internal/capability"
 	"dariyanws/internal/httpx"
 )
 
@@ -37,10 +42,19 @@ type Target struct {
 // At M5 this becomes the router's job, the same way ServiceFor did for authn.
 type TargetFor func(r *http.Request, p *commonv1.Principal) (Target, error)
 
+// Minter turns an allow into a portable capability. *capability.Minter satisfies it.
+//
+// Optional: with no minter the decision is made and consumed in this process, which is all M3
+// needed. From M4 the front door has one, and the decision starts travelling.
+type Minter interface {
+	Mint(capability.Claims) (*capabilityv1.SignedCapability, error)
+}
+
 // Config is what the middleware needs.
 type Config struct {
 	Decide Decider
 	Target TargetFor
+	Mint   Minter
 
 	// Dev lets a denial say which statement produced it. Off in production, where explaining a
 	// denial describes a policy to someone not entitled to read it.
@@ -116,7 +130,43 @@ func Middleware(cfg Config) httpx.Middleware {
 				return
 			}
 
-			next.ServeHTTP(w, r)
+			if cfg.Mint == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			token, err := cfg.Mint.Mint(capability.Claims{
+				AccountID:    principal.GetAccountId(),
+				PrincipalARN: principal.GetPrincipalArn(),
+				Action:       target.Action,
+				ResourceARN:  target.ResourceARN,
+				RequestID:    httpx.RequestID(r.Context()),
+			})
+			if err != nil {
+				// A decision that cannot be carried is not a decision that can be acted on.
+				// Failing here rather than proceeding without a token means a service never has
+				// to treat a missing capability as "probably fine".
+				cfg.Log.Error("could not mint a capability",
+					"request_id", httpx.RequestID(r.Context()), "error", err)
+				httpx.WriteError(w, r, apierr.Internal(err, "internal failure"), cfg.Dev)
+				return
+			}
+
+			// On the context for anything in this process, and on the header for whatever the
+			// front door proxies to at M5. Set on the request rather than the response: it
+			// travels inward, not back to the caller, who must never see it — a capability in a
+			// response is a bearer token handed to the one party already holding a credential
+			// for the same thing, with a different expiry and no way to revoke it.
+			encoded, err := proto.Marshal(token)
+			if err != nil {
+				cfg.Log.Error("could not encode a capability",
+					"request_id", httpx.RequestID(r.Context()), "error", err)
+				httpx.WriteError(w, r, apierr.Internal(err, "internal failure"), cfg.Dev)
+				return
+			}
+			r.Header.Set(httpx.CapabilityHeader, base64.StdEncoding.EncodeToString(encoded))
+
+			next.ServeHTTP(w, r.WithContext(httpx.WithCapability(r.Context(), token)))
 		})
 	}
 }

@@ -62,6 +62,14 @@ type Options struct {
 	// "how long after a revocation can this still work?".
 	KeyCacheTTL time.Duration
 
+	// Mint turns each allow into a capability the service downstream can verify offline
+	// (DESIGN.md decision 6). Nil leaves the decision in this process, which is what M3 did.
+	Mint authz.Minter
+
+	// CapabilityTTL bounds how long a minted decision can be acted on. Zero takes
+	// capability.DefaultTTL.
+	CapabilityTTL time.Duration
+
 	// PolicyCacheTTL is how long a principal's attached policies are reused. Zero takes the
 	// ttlcache default.
 	PolicyCacheTTL time.Duration
@@ -124,6 +132,7 @@ func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *stor
 		}),
 		authz.Middleware(authz.Config{
 			Decide: authorizer,
+			Mint:   opts.Mint,
 			Target: func(_ *http.Request, p *commonv1.Principal) (authz.Target, error) {
 				return authz.Target{
 					Action:      ActionPing,
@@ -169,11 +178,21 @@ func handlePing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpx.WriteJSON(w, r, http.StatusOK, map[string]string{
+	body := map[string]string{
 		"account_id":    p.GetAccountId(),
 		"principal_arn": p.GetPrincipalArn(),
 		"request_id":    httpx.RequestID(r.Context()),
-	})
+	}
+
+	// Which key signed the capability, and nothing else about it. The token itself must never
+	// reach the caller: it is a bearer credential for the very request they already
+	// authenticated, with a different expiry and no way to revoke it. What is useful to report
+	// is that one exists and which key a service would need to check it.
+	if token, ok := httpx.CapabilityFrom(r.Context()); ok {
+		body["capability_key_id"] = token.GetKeyId()
+	}
+
+	httpx.WriteJSON(w, r, http.StatusOK, body)
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {

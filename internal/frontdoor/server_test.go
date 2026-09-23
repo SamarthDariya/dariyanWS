@@ -2,23 +2,32 @@ package frontdoor
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	capabilityv1 "dariyanws/gen/dariya/capability/v1"
 	commonv1 "dariyanws/gen/dariya/common/v1"
 	controlv1 "dariyanws/gen/dariya/control/v1"
 	iamv1 "dariyanws/gen/dariya/iam/v1"
+	"dariyanws/internal/authn"
+	"dariyanws/internal/authz"
+	"dariyanws/internal/capability"
 	"dariyanws/internal/control"
 	"dariyanws/internal/httpx"
 	"dariyanws/internal/iam"
 	"dariyanws/internal/secrets"
 	"dariyanws/internal/signing"
 	"dariyanws/internal/store"
+
+	"google.golang.org/protobuf/proto"
 )
 
 const testRegion = "hind-1"
@@ -46,9 +55,11 @@ func newRegion(t *testing.T) (*httptest.Server, *control.AccountsServer, *iam.Se
 	accounts := control.NewAccountsServer(st, kr, testRegion, time.Now)
 	policies := iam.NewServer(st, testRegion, time.Now)
 
+	minter, _ := testTokenKeys(t)
 	handler, _ := NewHandler(accounts, policies, st, Options{
 		Region: testRegion,
 		Dev:    false,
+		Mint:   minter,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 
@@ -483,5 +494,175 @@ func TestRevokeTakesEffectImmediately(t *testing.T) {
 		t.Errorf("status after the revoke = %d, want 403 — DeletePolicy must invalidate every "+
 			"principal it was attached to, which it can only do by reading them before the "+
 			"cascade destroys the evidence", resp.StatusCode)
+	}
+}
+
+// testTokenKeys builds a matched mint/verify pair, as `dariyactl keygen` does for a real region.
+func testTokenKeys(t *testing.T) (*capability.Minter, *capability.Verifier) {
+	t.Helper()
+
+	seed, pub, err := capability.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	minter, err := capability.NewMinter("test", seed, capability.DefaultTTL, time.Now)
+	if err != nil {
+		t.Fatalf("NewMinter: %v", err)
+	}
+	return minter, capability.NewVerifier(map[string]ed25519.PublicKey{"test": pub}, time.Now)
+}
+
+// The token must reach the handler, and must NOT reach the caller. A capability in a response is
+// a bearer credential handed to the party who already authenticated for the same thing — with a
+// different expiry and no way to revoke it.
+func TestCapabilityIsMintedAndStaysServerSide(t *testing.T) {
+	st := store.OpenTest(t)
+	store.TruncateAll(t, st)
+
+	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
+	policies := iam.NewServer(st, testRegion, time.Now)
+	minter, _ := testTokenKeys(t)
+
+	handler, _ := NewHandler(accounts, policies, st, Options{
+		Region: testRegion,
+		Mint:   minter,
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+
+	// Wrap the whole chain so the capability can be observed exactly where a proxied service
+	// would find it: on the inbound request, after authz.
+	observed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(observed)
+	defer srv.Close()
+
+	acctID, cred := credentials(t, accounts)
+	grantPing(t, policies, acctID)
+
+	resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	var got map[string]string
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("not JSON: %s", body)
+	}
+
+	// The response says a capability exists and which key signed it, and carries no token.
+	if got["capability_key_id"] != "test" {
+		t.Errorf("capability_key_id = %q, want \"test\"", got["capability_key_id"])
+	}
+	if resp.Header.Get(httpx.CapabilityHeader) != "" {
+		t.Error("the capability was returned to the caller in a response header")
+	}
+	for k, v := range got {
+		if strings.Contains(strings.ToLower(k), "capability") && k != "capability_key_id" {
+			t.Errorf("response leaked capability material in %q: %q", k, v)
+		}
+	}
+}
+
+// What a downstream service will do at M5, done here in process: read the header, verify offline,
+// and find a decision it can act on.
+func TestCapabilityHeaderVerifiesOffline(t *testing.T) {
+	st := store.OpenTest(t)
+	store.TruncateAll(t, st)
+
+	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
+	policies := iam.NewServer(st, testRegion, time.Now)
+	minter, verifier := testTokenKeys(t)
+
+	var header string
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		header = r.Header.Get(httpx.CapabilityHeader)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	acctID := func() string {
+		resp, err := accounts.CreateAccount(context.Background(),
+			&controlv1.CreateAccountRequest{Name: "t"})
+		if err != nil {
+			t.Fatalf("CreateAccount: %v", err)
+		}
+		return resp.GetAccount().GetAccountId()
+	}()
+	grantPing(t, policies, acctID)
+
+	keyResp, err := accounts.CreateAccessKey(context.Background(),
+		&controlv1.CreateAccessKeyRequest{AccountId: acctID})
+	if err != nil {
+		t.Fatalf("CreateAccessKey: %v", err)
+	}
+	cred := signing.Credentials{
+		AccessKeyID: keyResp.GetAccessKey().GetAccessKeyId(),
+		Secret:      []byte(keyResp.GetAccessKey().GetSecretAccessKey()),
+	}
+
+	authorizer := iam.NewAuthorizer(policies, iam.AuthorizerOptions{})
+	chain := httpx.Chain(inner,
+		httpx.WithRequestID,
+		authn.Middleware(authn.Config{
+			Keys:    accounts,
+			Region:  testRegion,
+			Service: func(*http.Request) string { return ServiceName },
+			Log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}),
+		authz.Middleware(authz.Config{
+			Decide: authorizer,
+			Mint:   minter,
+			Target: func(_ *http.Request, p *commonv1.Principal) (authz.Target, error) {
+				return authz.Target{
+					Action:      ActionPing,
+					ResourceARN: PingResourceARN(testRegion, p.GetAccountId()),
+				}, nil
+			},
+			Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}),
+	)
+
+	srv := httptest.NewServer(chain)
+	defer srv.Close()
+
+	resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	if header == "" {
+		t.Fatal("no capability header reached the handler")
+	}
+	raw, err := base64.StdEncoding.DecodeString(header)
+	if err != nil {
+		t.Fatalf("header is not base64: %v", err)
+	}
+	var token capabilityv1.SignedCapability
+	if err := proto.Unmarshal(raw, &token); err != nil {
+		t.Fatalf("header is not a SignedCapability: %v", err)
+	}
+
+	cap, err := verifier.Verify(&token)
+	if err != nil {
+		t.Fatalf("a service holding only the public key could not verify: %v", err)
+	}
+	if cap.GetAction() != ActionPing {
+		t.Errorf("action = %q", cap.GetAction())
+	}
+	if cap.GetResourceArn() != PingResourceARN(testRegion, acctID) {
+		t.Errorf("resource = %q", cap.GetResourceArn())
+	}
+	if cap.GetAccountId() != acctID {
+		t.Errorf("account = %q", cap.GetAccountId())
 	}
 }

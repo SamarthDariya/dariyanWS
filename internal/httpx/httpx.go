@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"time"
 
+	capabilityv1 "dariyanws/gen/dariya/capability/v1"
 	commonv1 "dariyanws/gen/dariya/common/v1"
 	"dariyanws/internal/apierr"
 )
@@ -31,7 +32,15 @@ const (
 	ctxKeyRequestID ctxKey = iota
 	ctxKeyPrincipal
 	ctxKeyLogFields
+	ctxKeyCapability
 )
+
+// CapabilityHeader carries the signed capability to the service that will act on it.
+//
+// base64 of the serialised SignedCapability. A header rather than a body field because it has to
+// survive being proxied by something that does not parse the payload — which is what the front
+// door becomes at M5.
+const CapabilityHeader = "X-Dariya-Capability"
 
 // NewRequestID mints an identifier. Sixteen random bytes: short enough to paste into a message,
 // long enough that ids from different processes will not collide, and carrying no timestamp or
@@ -98,6 +107,17 @@ func WithPrincipal(ctx context.Context, p *commonv1.Principal) context.Context {
 		f.principalARN = p.GetPrincipalArn()
 	}
 	return context.WithValue(ctx, ctxKeyPrincipal, p)
+}
+
+// WithCapability attaches a minted capability. Only the authz middleware may call it.
+func WithCapability(ctx context.Context, token *capabilityv1.SignedCapability) context.Context {
+	return context.WithValue(ctx, ctxKeyCapability, token)
+}
+
+// CapabilityFrom reads the capability minted for this request, if one was.
+func CapabilityFrom(ctx context.Context) (*capabilityv1.SignedCapability, bool) {
+	token, ok := ctx.Value(ctxKeyCapability).(*capabilityv1.SignedCapability)
+	return token, ok
 }
 
 // ---------------------------------------------------------------------------

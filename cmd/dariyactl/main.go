@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"net/url"
@@ -27,6 +28,7 @@ import (
 	commonv1 "dariyanws/gen/dariya/common/v1"
 	controlv1 "dariyanws/gen/dariya/control/v1"
 	iamv1 "dariyanws/gen/dariya/iam/v1"
+	"dariyanws/internal/capability"
 	"dariyanws/internal/control"
 	"dariyanws/internal/iam"
 	"dariyanws/internal/secrets"
@@ -50,6 +52,16 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+
+	// keygen and sign are pure and need no database, so they are handled before anything
+	// connects — keygen in particular has to work on a machine where nothing is running yet,
+	// since its output is what makes the rest runnable.
+	if os.Args[1] == "keygen" {
+		if err := cmdKeygen(); err != nil {
+			fatal(err)
+		}
+		return
 	}
 
 	// `sign` is pure and needs no database, so it is handled before anything connects. It exists
@@ -327,6 +339,7 @@ func usage() {
   dariyactl key list --account ID
   dariyactl key delete --id KEYID
   dariyactl sign --service SVC --url URL [--method M] [--body B]
+  dariyactl keygen
 
 Environment:
   DARIYA_DSN            Postgres DSN (default: the local region)
@@ -365,4 +378,28 @@ func grantAdmin(ctx context.Context, srv *plane, accountID string) error {
 		PrincipalArn: fmt.Sprintf("arn:dariya:iam:%s:%s:user/root", defaultRegion, accountID),
 	})
 	return err
+}
+
+// cmdKeygen prints every key the region needs, in one place.
+//
+// One command rather than three, because these keys have to agree with each other: the front
+// door's token signing key and the public key every service verifies with are two halves of one
+// pair, and generating them separately is how a region ends up minting tokens nothing accepts.
+func cmdKeygen() error {
+	master, err := secrets.GenerateKey()
+	if err != nil {
+		return err
+	}
+	seed, pub, err := capability.GenerateKey()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("export %s=dev1:%s\n", secrets.EnvVar, base64.StdEncoding.EncodeToString(master))
+	fmt.Printf("export %s=dev1:%s\n", capability.EnvSigningKey, base64.StdEncoding.EncodeToString(seed))
+	fmt.Printf("export %s=dev1:%s\n", capability.EnvPublicKeys, base64.StdEncoding.EncodeToString(pub))
+	fmt.Fprintln(os.Stderr,
+		"# Keep these. Credentials encrypted under a previous master key stop decrypting, and "+
+			"tokens signed by a previous key stop verifying.")
+	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"dariyanws/internal/capability"
 	"dariyanws/internal/control"
 	"dariyanws/internal/frontdoor"
 	"dariyanws/internal/iam"
@@ -66,6 +67,13 @@ func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, log *
 		return err
 	}
 
+	// A front door that cannot mint capabilities cannot authorize anything a service will
+	// honour, so a missing token key is fatal at boot rather than at the first allow.
+	minter, err := capability.NewMinterFromEnv(0)
+	if err != nil {
+		return err
+	}
+
 	accounts := control.NewAccountsServer(st, kr, region, time.Now)
 	policies := iam.NewServer(st, region, time.Now)
 
@@ -73,6 +81,7 @@ func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, log *
 		Region:          region,
 		Dev:             dev,
 		Log:             log,
+		Mint:            minter,
 		DisableKeyCache: nocache,
 	})
 
