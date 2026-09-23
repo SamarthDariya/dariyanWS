@@ -319,9 +319,21 @@ things the API never mentions — that the capability names a resource, and that
 obliged to compare it to the one being served. An author who has not read decision 6 has no cue at
 all.
 
-**The fix (M4.4):** `Authenticate` is removed rather than documented. The replacement cannot be
-called without stating what the request is for, so the comparison happens inside the helper and
-the vulnerable service becomes unwriteable rather than discouraged.
+**The fix (M4.4), and whether it worked:** `Authenticate` was removed rather than documented.
+`Guard.Authorize(r, Intent{Action, ResourceARN})` cannot be called without stating what the
+request is for, so the comparison happens inside the helper. The test that asserted the breach now
+asserts its absence, and the three controls from M4.3 are kept — the fix must not have been
+achieved by breaking verification.
+
+The check worth noting is the redundant one. `Authorize` confirms the account named in the token
+agrees with the account in its own resource ARN, which cannot fail for any token the front door
+currently mints. It is there because it is the check that fires loudly the day someone changes the
+minting side to produce a token whose account and resource disagree — a mistake that would
+otherwise stay invisible until it was a cross-tenant incident.
+
+**What this does not fix:** a service can still decline to call `Authorize` at all. The API makes
+the wrong check impossible to write; it cannot make the missing call impossible to omit. That is
+the residue, and the honest bound on what an API shape can buy.
 
 That distinction is the transferable part. A rule in a comment is a rule every future service
 author has to read; a rule in a function signature is one they cannot skip. This is the second
