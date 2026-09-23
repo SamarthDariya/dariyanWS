@@ -286,9 +286,9 @@ long-poll, at idle and under load.
 
 Not a performance experiment. A deliberately planted bug, and the test that must catch it.
 
-M4 ships a service that verifies the capability signature correctly and **ignores the `resource_arn`
-field**. A valid token for `function/a` must then successfully invoke `function/b`. The test that
-demonstrates this is the deliverable; the fix is the second commit.
+M4 ships a service that verifies the capability signature correctly and **ignores the
+`resource_arn` field**. A valid token for `function/a` must then successfully invoke `function/b`.
+The test that demonstrates this is the deliverable; the fix is the second commit.
 
 The point is to find out whether the contract makes the correct check the *easy* one. If catching
 this requires every service author to remember a rule, the contract is wrong and the verification
@@ -296,9 +296,38 @@ helper should refuse to return a principal without being told what request it is
 
 **Predicted:** the naive helper signature makes the bug easy to write.
 
-**Measured:**
+**Measured (M4.3):** confirmed, and more cleanly than expected. `internal/servicekit.Authenticate`
+verifies the signature and the expiry and returns the capability; a service written against it in
+the obvious way is nine lines and holds a skeleton key.
 
-**Wrong about:**
+```
+E4 CONFIRMED: a capability minted for arn:dariya:func:...:function/a
+successfully invoked arn:dariya:func:...:function/b.
+The signature check was correct and irrelevant.
+```
+
+What makes it worth the milestone is **what is not wrong** with the vulnerable service. It rejects
+a request with no capability. It rejects a forged one. It rejects one signed by another front
+door's key. Every individual thing it does, it does correctly — there is no missing `if` that a
+reviewer would notice was missing, because the check that is absent was never written down as
+something to include. Those three controls are tests of their own, so the finding is about the
+missing comparison and not about the verifier being broken in a more boring way.
+
+**Wrong about:** nothing in the prediction, but the prediction was too weak. It said the bug would
+be "easy to write". It is easier than that: the correct version requires the author to know two
+things the API never mentions — that the capability names a resource, and that their service is
+obliged to compare it to the one being served. An author who has not read decision 6 has no cue at
+all.
+
+**The fix (M4.4):** `Authenticate` is removed rather than documented. The replacement cannot be
+called without stating what the request is for, so the comparison happens inside the helper and
+the vulnerable service becomes unwriteable rather than discouraged.
+
+That distinction is the transferable part. A rule in a comment is a rule every future service
+author has to read; a rule in a function signature is one they cannot skip. This is the second
+time this project has reached for the same answer — decision 4 put `account_id` in every storage
+key so isolation is structural rather than remembered — and it is the more reliable of the two
+kinds of safety by some distance.
 
 ---
 
