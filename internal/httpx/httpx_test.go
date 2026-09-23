@@ -209,3 +209,59 @@ func TestAccessLogRuns(t *testing.T) {
 		t.Errorf("status = %d, want 418", rec.Code)
 	}
 }
+
+// Context values propagate downward only, so an access log wrapped around authentication cannot
+// see a principal attached deeper in the chain. Without the shared holder, every line would say
+// the request was anonymous.
+func TestAccessLogNamesTheCaller(t *testing.T) {
+	var buf strings.Builder
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+
+	// Stands in for the authn middleware: attaches a principal to a DERIVED context.
+	attachPrincipal := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := WithPrincipal(r.Context(), &commonv1.Principal{
+				AccountId:    "000000000007",
+				PrincipalArn: "arn:dariya:iam:hind-1:000000000007:user/root",
+			})
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+
+	h := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), WithRequestID, AccessLog(log), attachPrincipal)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/ping", nil))
+
+	if !strings.Contains(buf.String(), "account_id=000000000007") {
+		t.Errorf("access log did not name the caller:\n%s", buf.String())
+	}
+}
+
+// Rejected requests must still be logged — the 401s are the interesting lines — and they have no
+// principal to name.
+func TestAccessLogCoversRejectedRequests(t *testing.T) {
+	var buf strings.Builder
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+
+	reject := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			WriteError(w, r, &apierr.Error{Code: apierr.CodeInvalidSig, Message: "nope"}, false)
+		})
+	}
+
+	h := Chain(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("handler should not have been reached")
+	}), WithRequestID, AccessLog(log), reject)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/ping", nil))
+
+	out := buf.String()
+	if !strings.Contains(out, "status=401") {
+		t.Errorf("rejected request was not logged:\n%s", out)
+	}
+	if strings.Contains(out, "account_id=") {
+		t.Errorf("a rejected request was attributed to an account:\n%s", out)
+	}
+}

@@ -1,30 +1,84 @@
 // Command frontdoor is the single endpoint every request to this cloud enters through
 // (DESIGN.md decision 2).
 //
-// M0 ships the skeleton and nothing else: there is no listener, because a front door that accepts
-// connections before it can verify a signature is a front door that is briefly an open proxy, and
-// the tempting shortcut is to leave it that way "just for local dev". It starts listening at M2,
-// when signature verification lands with it.
+// It verifies a signature, and from M3 it will ask IAM for a decision, mint a capability token,
+// and proxy to the service that owns the resource. At M2 it authenticates and answers /ping.
 package main
 
 import (
+	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"dariyanws/internal/control"
+	"dariyanws/internal/frontdoor"
+	"dariyanws/internal/secrets"
+	"dariyanws/internal/store"
 )
 
-// Region is pinned (DESIGN.md decision 4). It is a variable rather than a constant so the second
-// region, when it exists, is a flag and not a rebuild.
-var region = flag.String("region", "hind-1", "region this front door serves")
-
 func main() {
-	dev := flag.Bool("dev", os.Getenv("DARIYA_DEV") == "1",
-		"development mode: error responses say which check rejected a request")
+	var (
+		addr   = flag.String("addr", envOr("DARIYA_ADDR", ":8080"), "listen address")
+		region = flag.String("region", envOr("DARIYA_REGION", "hind-1"), "region this front door serves")
+		dsn    = flag.String("dsn", envOr("DARIYA_DSN", store.DefaultTestDSN), "control-plane Postgres DSN")
+		dev    = flag.Bool("dev", os.Getenv("DARIYA_DEV") == "1",
+			"development mode: error responses name the check that rejected a request")
+	)
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	log.Info("dariyanWS front door", "region", *region, "dev", *dev, "milestone", "M0")
 
-	fmt.Fprintln(os.Stderr, "M0: contract only — no listener until M2. See DESIGN.md.")
+	// Signals are wired before anything is opened, so a Ctrl-C during a slow database connect
+	// still exits instead of requiring a second, less patient one.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, *addr, *region, *dsn, *dev, log); err != nil {
+		log.Error("front door stopped", "error", err)
+		os.Exit(1)
+	}
+	log.Info("front door stopped")
+}
+
+func run(ctx context.Context, addr, region, dsn string, dev bool, log *slog.Logger) error {
+	st, err := store.Open(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	if err := st.Migrate(ctx); err != nil {
+		return err
+	}
+
+	// A missing master key is fatal at boot rather than at the first request. Every signed request
+	// needs to decrypt an access key secret, so a front door without one can authenticate nobody —
+	// better to fail to start than to serve a wall of 403s that look like a signing bug.
+	kr, err := secrets.NewKeyringFromEnv()
+	if err != nil {
+		return err
+	}
+
+	accounts := control.NewAccountsServer(st, kr, region, time.Now)
+	handler := frontdoor.NewHandler(accounts, st, frontdoor.Options{
+		Region: region,
+		Dev:    dev,
+		Log:    log,
+	})
+
+	if dev {
+		log.Warn("development mode: error responses will name the check that rejected a request")
+	}
+	return frontdoor.Serve(ctx, addr, handler, log)
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

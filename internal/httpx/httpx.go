@@ -30,6 +30,7 @@ type ctxKey int
 const (
 	ctxKeyRequestID ctxKey = iota
 	ctxKeyPrincipal
+	ctxKeyLogFields
 )
 
 // NewRequestID mints an identifier. Sixteen random bytes: short enough to paste into a message,
@@ -60,6 +61,22 @@ func withRequestID(ctx context.Context, id string) context.Context {
 // Principal
 // ---------------------------------------------------------------------------
 
+// logFields is a mutable holder the access log installs on the way in and inner middleware fills
+// on the way down.
+//
+// It exists because context values propagate downward only: authn attaches the principal to a
+// context it derives, which the outer AccessLog — holding the original request — can never see.
+// Without a shared holder, the access log can only ever report requests as anonymous, which is
+// most of the way to useless.
+//
+// Not mutex-guarded: it is written once by the authn middleware and read once by the access log,
+// both on the request's own goroutine, after the handler has returned. A handler that fans out to
+// other goroutines must not touch it.
+type logFields struct {
+	accountID    string
+	principalARN string
+}
+
 // PrincipalFrom reads the authenticated caller off a context.
 //
 // The second return is false when authentication has not run, and a handler must treat that as a
@@ -72,7 +89,14 @@ func PrincipalFrom(ctx context.Context) (*commonv1.Principal, bool) {
 }
 
 // WithPrincipal attaches a verified caller. Only the authn middleware may call it.
+//
+// It also records the caller in the access log's holder, so the one call site that authenticates
+// is also the one call site that makes the request attributable.
 func WithPrincipal(ctx context.Context, p *commonv1.Principal) context.Context {
+	if f, ok := ctx.Value(ctxKeyLogFields).(*logFields); ok {
+		f.accountID = p.GetAccountId()
+		f.principalARN = p.GetPrincipalArn()
+	}
 	return context.WithValue(ctx, ctxKeyPrincipal, p)
 }
 
@@ -197,16 +221,19 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// AccessLog emits one structured line per request.
+// AccessLog emits one structured line per request, naming the caller when there was one.
 //
-// It logs the principal when authentication has already run, which is why it sits inside the authn
-// middleware in the chain rather than outside it: a log line that cannot say who made the request
-// is most of the way to useless.
+// It sits OUTSIDE authentication, so that rejected requests are logged too — the 401s are the
+// interesting lines — and picks up the principal through the holder it installs, because a
+// context attached deeper in the chain never reaches back out here.
 func AccessLog(log *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rec := &statusRecorder{ResponseWriter: w}
+
+			fields := &logFields{}
+			r = r.WithContext(context.WithValue(r.Context(), ctxKeyLogFields, fields))
 
 			next.ServeHTTP(rec, r)
 
@@ -218,8 +245,8 @@ func AccessLog(log *slog.Logger) Middleware {
 				"bytes", rec.bytes,
 				"duration_ms", float64(time.Since(start).Microseconds()) / 1000,
 			}
-			if p, ok := PrincipalFrom(r.Context()); ok {
-				attrs = append(attrs, "account_id", p.GetAccountId(), "principal", p.GetPrincipalArn())
+			if fields.accountID != "" {
+				attrs = append(attrs, "account_id", fields.accountID, "principal", fields.principalARN)
 			}
 			log.Info("request", attrs...)
 		})
