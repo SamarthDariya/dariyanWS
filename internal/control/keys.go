@@ -186,6 +186,12 @@ func (s *AccountsServer) DeleteAccessKey(ctx context.Context, req *controlv1.Del
 	if tag.RowsAffected() == 0 {
 		return nil, apierr.NotFound("no access key %s", req.GetAccessKeyId())
 	}
+
+	// Fired after the row is gone, never before: a cache dropped ahead of a delete that then
+	// failed would leave the entry to be re-populated from the row that still exists.
+	if s.onKeyDeleted != nil {
+		s.onKeyDeleted(req.GetAccessKeyId())
+	}
 	return &controlv1.DeleteAccessKeyResponse{}, nil
 }
 

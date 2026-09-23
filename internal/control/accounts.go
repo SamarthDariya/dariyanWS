@@ -43,6 +43,11 @@ type AccountsServer struct {
 	now     Clock
 	keyring *secrets.Keyring
 
+	// onKeyDeleted lets a cache in front of ResolveSigningKey drop an entry the moment the key
+	// is revoked. Without it, revocation would always wait out the cache TTL even on the very
+	// process that served the delete.
+	onKeyDeleted func(accessKeyID string)
+
 	// region is stamped into the principal ARNs this service mints. Pinned today (DESIGN.md
 	// decision 4), a field rather than a constant so a second region is configuration.
 	region string
@@ -60,6 +65,9 @@ func NewAccountsServer(st *store.Store, kr *secrets.Keyring, region string, now 
 // Idempotent on client_token: a client that times out and retries must not end up owning two
 // accounts. The idempotency row and the account row are written in one transaction, so the retry
 // either finds a complete pair or finds nothing at all.
+// OnKeyDeleted registers a callback fired after a successful DeleteAccessKey.
+func (s *AccountsServer) OnKeyDeleted(fn func(accessKeyID string)) { s.onKeyDeleted = fn }
+
 func (s *AccountsServer) CreateAccount(ctx context.Context, req *controlv1.CreateAccountRequest) (*controlv1.CreateAccountResponse, error) {
 	if err := validateName(req.GetName()); err != nil {
 		return nil, err

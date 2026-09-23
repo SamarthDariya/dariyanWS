@@ -45,7 +45,7 @@ func newRegion(t *testing.T) (*httptest.Server, *control.AccountsServer) {
 	}
 
 	accounts := control.NewAccountsServer(st, kr, testRegion, time.Now)
-	handler := NewHandler(accounts, st, Options{
+	handler, _ := NewHandler(accounts, st, Options{
 		Region: testRegion,
 		Dev:    false,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -145,8 +145,15 @@ func TestUnsignedPingIsRejected(t *testing.T) {
 	}
 }
 
-// A credential deleted through the control plane must stop working immediately, with no cache and
-// no state column standing between the delete and the signing path.
+// A credential deleted through the control plane stops working immediately — and since M2.5 that
+// is a property of the invalidation hook, not of there being no cache.
+//
+// The distinction matters and is the reason this comment is longer than the test. Revocation is
+// immediate on the process that served the delete, because DeleteAccessKey calls Invalidate.
+// Any OTHER front door would keep honouring the credential until its entry expires, which is the
+// cost BREAK.md records and control.TestRevocationIsBoundedByTheTTL asserts directly. With one
+// front door the two are the same thing; with two they are not, and this test would keep passing
+// while the guarantee quietly weakened.
 func TestDeletedCredentialStopsWorkingAtOnce(t *testing.T) {
 	srv, accounts := newRegion(t)
 	_, cred := credentials(t, accounts)
@@ -217,7 +224,7 @@ func TestTamperedQueryIsRejected(t *testing.T) {
 
 func TestServeDrainsOnCancel(t *testing.T) {
 	st := store.OpenTest(t)
-	handler := NewHandler(
+	handler, _ := NewHandler(
 		control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now),
 		st,
 		Options{Region: testRegion, Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
@@ -286,5 +293,64 @@ func fixedPrincipal() *commonv1.Principal {
 	return &commonv1.Principal{
 		AccountId:    "000000000000",
 		PrincipalArn: "arn:dariya:iam:hind-1:000000000000:user/root",
+	}
+}
+
+// The cache has to be in the path, or E2b measures nothing. Asserted through the front door
+// rather than against the resolver, because the wiring is the part that can silently be missing.
+func TestKeyCacheIsInThePath(t *testing.T) {
+	st := store.OpenTest(t)
+	if _, err := st.Pool().Exec(context.Background(),
+		`TRUNCATE access_keys, accounts, idempotency`); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
+	handler, cache := NewHandler(accounts, st, Options{
+		Region: testRegion,
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if cache == nil {
+		t.Fatal("no cache was built")
+	}
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	_, cred := credentials(t, accounts)
+
+	for i := 0; i < 20; i++ {
+		resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status %d", i, resp.StatusCode)
+		}
+	}
+
+	stats := cache.Stats()
+	if stats.Misses != 1 {
+		t.Errorf("cache missed %d times for 20 identical callers, want 1", stats.Misses)
+	}
+	if stats.Hits != 19 {
+		t.Errorf("cache hits = %d, want 19", stats.Hits)
+	}
+}
+
+// With the cache disabled the front door must go back to Postgres every time, or E2b has no
+// control to compare against.
+func TestKeyCacheCanBeDisabled(t *testing.T) {
+	st := store.OpenTest(t)
+	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
+
+	_, cache := NewHandler(accounts, st, Options{
+		Region:          testRegion,
+		DisableKeyCache: true,
+		Log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if cache != nil {
+		t.Error("DisableKeyCache still built a cache")
 	}
 }

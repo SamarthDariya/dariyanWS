@@ -36,6 +36,15 @@ const ServiceName = "ws"
 type Options struct {
 	Region string
 
+	// KeyCacheTTL is how long a resolved access key is reused. Zero takes control.DefaultTTL,
+	// which is deliberately the capability token lifetime, so the whole system has one answer to
+	// "how long after a revocation can this still work?".
+	KeyCacheTTL time.Duration
+
+	// DisableKeyCache restores the uncached path. It exists so E2's control can be re-run against
+	// the same binary rather than against a remembered number from a previous commit.
+	DisableKeyCache bool
+
 	// Dev makes error responses say which check rejected a request. Off in production, where that
 	// detail describes the system to the caller least entitled to it.
 	Dev bool
@@ -47,10 +56,22 @@ type Options struct {
 //
 // Separated from listening so tests can exercise the whole chain — request ids, authentication,
 // error rendering — over an in-process transport without binding a port.
-func NewHandler(accounts *control.AccountsServer, st *store.Store, opts Options) http.Handler {
+func NewHandler(accounts *control.AccountsServer, st *store.Store, opts Options) (http.Handler, *control.CachingResolver) {
 	log := opts.Log
 	if log == nil {
 		log = slog.Default()
+	}
+
+	// E2 measured the uncached lookup at 96.4% of everything the front door adds, with the pool
+	// as the concurrency ceiling. The cache is that measurement's answer; see BREAK.md.
+	var keys authn.KeyResolver = accounts
+	var cache *control.CachingResolver
+	if !opts.DisableKeyCache {
+		cache = control.NewCachingResolver(accounts, control.CacheOptions{TTL: opts.KeyCacheTTL})
+		// Revocation stays immediate on the process that served the delete; the TTL is the bound
+		// for any other front door, which is a story that only starts mattering when there is one.
+		accounts.OnKeyDeleted(cache.Invalidate)
+		keys = cache
 	}
 
 	mux := http.NewServeMux()
@@ -59,7 +80,7 @@ func NewHandler(accounts *control.AccountsServer, st *store.Store, opts Options)
 	authenticated := httpx.Chain(
 		http.HandlerFunc(handlePing),
 		authn.Middleware(authn.Config{
-			Keys:    accounts,
+			Keys:    keys,
 			Region:  opts.Region,
 			Service: func(*http.Request) string { return ServiceName },
 			Dev:     opts.Dev,
@@ -83,7 +104,7 @@ func NewHandler(accounts *control.AccountsServer, st *store.Store, opts Options)
 		httpx.WithRequestID,
 		httpx.Recover(opts.Dev),
 		httpx.AccessLog(log),
-	)
+	), cache
 }
 
 // handlePing echoes the caller back to themselves.

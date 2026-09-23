@@ -169,6 +169,58 @@ percentiles are bounded in every run, so no distribution was truncated.
 
 ---
 
+## E2b — the same sweep, with the cache the measurement chose
+
+**Predicted** (written at the end of E2, before `internal/control/keycache.go` existed): the ratio
+at 64 connections falls from 32.9× to under 3×; B stops going backwards; the new dominant term
+becomes the 4,291 ns signature-verification path.
+
+**Setup:** identical, plus a third target. All three run from the same binary and the same
+process tree, in one script, so the comparison is within-run.
+
+- **A, bare:** `cmd/echo`.
+- **B, uncached:** the front door with `--no-key-cache`, which is E2's configuration.
+- **C, cached:** the front door as it now ships.
+
+**Measured** (2026-09-23, same machine):
+
+| connections | A bare | B uncached | C cached | C vs A | C vs B |
+|---|---|---|---|---|---|
+| 1 | 17,820 rps / 0.049 ms | 1,350 / 0.647 ms | **11,000 / 0.081 ms** | 1.62× | **8.1× faster** |
+| 8 | 68,228 rps / 0.100 ms | 4,754 / 1.581 ms | **31,887 / 0.196 ms** | 2.14× | **6.7× faster** |
+| 64 | 90,230 rps / 0.444 ms | 4,835 / 12.71 ms | **29,832 / 1.876 ms** | **3.02×** | **6.2× faster** |
+
+p99 at 64 connections: A 4.65 ms, B 21.6 ms, **C 8.19 ms**.
+
+**Right about:** the ratio at 64 connections — predicted "under 3×", measured **3.02×**. Close
+enough to be luck rather than insight, and it is recorded as a hit only because the prediction was
+committed before the code was written.
+
+**Wrong about, slightly:** "stops going backwards". C is 31,887 rps at 8 connections and 29,832 at
+64 — a 6% dip, so it plateaus rather than degrades. The collapse is gone; perfect flatness is not
+what happened, and the residual dip is real rather than noise, because B shows the same shape far
+more violently.
+
+**The finding:** the cache is worth **6-8×**, and more importantly it changes the *shape*. B's
+throughput was falling with concurrency; C's is flat. The pool stopped being the ceiling.
+
+### A caveat that matters more than any single number
+
+**A measured 9,849 rps at one connection during E2 and 17,820 during E2b — an 81% difference on the
+same machine, same binary, same flags.** Thermal state, background load, whatever it was, it means
+**absolute numbers are not comparable across runs**, and every ratio quoted here is only meaningful
+because A, B and C were measured inside one script invocation minutes apart.
+
+The tempting mistake is to compare E2's 32.9× against E2b's 3.02× and call it a 10× improvement.
+The honest comparison is within E2b: **B 4,835 against C 29,832 at the same concurrency in the same
+run.** That is 6.2×, and it is the number to quote.
+
+This is the rig's own lesson from unit 0 arriving again — a measurement compared against a
+remembered number is not a measurement — and it is why `--no-key-cache` exists in the shipping
+binary rather than the control being a previous commit.
+
+---
+
 ## E3 — The poll latency that decision 7 accepted
 
 **The claim** (DESIGN.md decision 7): polling costs "tens of ms at best" and long-polling recovers

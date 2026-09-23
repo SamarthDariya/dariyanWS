@@ -27,6 +27,8 @@ func main() {
 		dsn    = flag.String("dsn", envOr("DARIYA_DSN", store.DefaultTestDSN), "control-plane Postgres DSN")
 		dev    = flag.Bool("dev", os.Getenv("DARIYA_DEV") == "1",
 			"development mode: error responses name the check that rejected a request")
+		nocache = flag.Bool("no-key-cache", false,
+			"resolve every access key from Postgres — E2's control, see BREAK.md")
 	)
 	flag.Parse()
 
@@ -37,14 +39,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, *region, *dsn, *dev, log); err != nil {
+	if err := run(ctx, *addr, *region, *dsn, *dev, *nocache, log); err != nil {
 		log.Error("front door stopped", "error", err)
 		os.Exit(1)
 	}
 	log.Info("front door stopped")
 }
 
-func run(ctx context.Context, addr, region, dsn string, dev bool, log *slog.Logger) error {
+func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, log *slog.Logger) error {
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
 		return err
@@ -64,10 +66,11 @@ func run(ctx context.Context, addr, region, dsn string, dev bool, log *slog.Logg
 	}
 
 	accounts := control.NewAccountsServer(st, kr, region, time.Now)
-	handler := frontdoor.NewHandler(accounts, st, frontdoor.Options{
-		Region: region,
-		Dev:    dev,
-		Log:    log,
+	handler, _ := frontdoor.NewHandler(accounts, st, frontdoor.Options{
+		Region:          region,
+		Dev:             dev,
+		Log:             log,
+		DisableKeyCache: nocache,
 	})
 
 	if dev {
