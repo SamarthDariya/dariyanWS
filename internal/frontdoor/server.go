@@ -15,14 +15,18 @@ package frontdoor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
+	commonv1 "dariyanws/gen/dariya/common/v1"
 	"dariyanws/internal/apierr"
 	"dariyanws/internal/authn"
+	"dariyanws/internal/authz"
 	"dariyanws/internal/control"
 	"dariyanws/internal/httpx"
+	"dariyanws/internal/iam"
 	"dariyanws/internal/store"
 )
 
@@ -32,6 +36,23 @@ import (
 // table rather than a constant.
 const ServiceName = "ws"
 
+// ActionPing is the permission /ping requires.
+//
+// /ping exists to prove the path works, and from M3.4 the path includes authorization — so it
+// requires a real permission rather than being exempt. An endpoint exempted "because it is only a
+// test endpoint" is how a system ends up with an unauthenticated corner nobody remembers.
+const ActionPing = "ws:Ping"
+
+// PingResourceARN is what a ping acts on: the caller's own endpoint in this region.
+//
+// A resource is required because the policy language has no concept of an action without one, and
+// inventing an exemption for actions that act on nothing would be a second evaluation path. The
+// account in the ARN is the caller's, so a policy granting ws:Ping cannot be written once and
+// reused across tenants.
+func PingResourceARN(region, accountID string) string {
+	return fmt.Sprintf("arn:dariya:ws:%s:%s:endpoint/ping", region, accountID)
+}
+
 // Options configure a front door.
 type Options struct {
 	Region string
@@ -40,6 +61,10 @@ type Options struct {
 	// which is deliberately the capability token lifetime, so the whole system has one answer to
 	// "how long after a revocation can this still work?".
 	KeyCacheTTL time.Duration
+
+	// PolicyCacheTTL is how long a principal's attached policies are reused. Zero takes the
+	// ttlcache default.
+	PolicyCacheTTL time.Duration
 
 	// DisableKeyCache restores the uncached path. It exists so E2's control can be re-run against
 	// the same binary rather than against a remembered number from a previous commit.
@@ -56,7 +81,7 @@ type Options struct {
 //
 // Separated from listening so tests can exercise the whole chain — request ids, authentication,
 // error rendering — over an in-process transport without binding a port.
-func NewHandler(accounts *control.AccountsServer, st *store.Store, opts Options) (http.Handler, *control.CachingResolver) {
+func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *store.Store, opts Options) (http.Handler, *control.CachingResolver) {
 	log := opts.Log
 	if log == nil {
 		log = slog.Default()
@@ -74,9 +99,20 @@ func NewHandler(accounts *control.AccountsServer, st *store.Store, opts Options)
 		keys = cache
 	}
 
+	// The policy cache gets the same treatment as the credential cache, and for the same
+	// measured reason (BREAK.md E2). Invalidation is wired both ways so a grant or a revocation
+	// served by this process takes effect at once rather than at the end of a TTL.
+	authorizer := iam.NewAuthorizer(policies, iam.AuthorizerOptions{
+		TTL: opts.PolicyCacheTTL,
+		Dev: opts.Dev,
+	})
+	policies.OnPrincipalChanged(authorizer.InvalidatePrincipal)
+
 	mux := http.NewServeMux()
 
-	// Authenticated routes. Everything the cloud actually does will live behind this chain.
+	// Authenticated and authorized. Everything the cloud actually does lives behind this chain,
+	// authn outermost: there is no point asking what a caller may do before knowing who they are,
+	// and authz fails closed if it ever finds itself without one.
 	authenticated := httpx.Chain(
 		http.HandlerFunc(handlePing),
 		authn.Middleware(authn.Config{
@@ -85,6 +121,17 @@ func NewHandler(accounts *control.AccountsServer, st *store.Store, opts Options)
 			Service: func(*http.Request) string { return ServiceName },
 			Dev:     opts.Dev,
 			Log:     log,
+		}),
+		authz.Middleware(authz.Config{
+			Decide: authorizer,
+			Target: func(_ *http.Request, p *commonv1.Principal) (authz.Target, error) {
+				return authz.Target{
+					Action:      ActionPing,
+					ResourceARN: PingResourceARN(opts.Region, p.GetAccountId()),
+				}, nil
+			},
+			Dev: opts.Dev,
+			Log: log,
 		}),
 	)
 	mux.Handle("/ping", authenticated)

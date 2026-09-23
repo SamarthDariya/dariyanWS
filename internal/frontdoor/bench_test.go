@@ -10,10 +10,14 @@ import (
 	"testing"
 	"time"
 
+	commonv1 "dariyanws/gen/dariya/common/v1"
 	controlv1 "dariyanws/gen/dariya/control/v1"
+	iamv1 "dariyanws/gen/dariya/iam/v1"
 	"dariyanws/internal/authn"
+	"dariyanws/internal/authz"
 	"dariyanws/internal/control"
 	"dariyanws/internal/httpx"
+	"dariyanws/internal/iam"
 	"dariyanws/internal/signing"
 )
 
@@ -202,4 +206,145 @@ func BenchmarkReportEnvironment(b *testing.B) {
 	b.Logf("GOMAXPROCS=%d NumCPU=%d", runtime.GOMAXPROCS(0), runtime.NumCPU())
 	st := openBenchStore(b)
 	b.Logf("pgx pool max conns=%d", st.Pool().Config().MaxConns)
+}
+
+// E2c: what authorization adds on top of authentication.
+//
+// Measured in-process and in the same run as the layers below it, because BREAK.md's caveat from
+// E2b applies — the bare handler measured 9,849 rps in one run and 17,820 in the next, so a
+// number compared against a remembered one is not a measurement.
+//
+//	BenchmarkAuthnCachedKeys   authentication only, credential cache warm
+//	BenchmarkAuthnAuthzCached  authentication and authorization, both caches warm
+//	BenchmarkAuthorizeOnly     the decision on its own, cache warm
+//	BenchmarkEvaluateOnly      the pure policy evaluation, no cache, no database
+
+func benchIAM(b *testing.B, accountID string) (*iam.Server, *iam.Authorizer) {
+	b.Helper()
+
+	st := openBenchStore(b)
+	policies := iam.NewServer(st, testRegion, time.Now)
+
+	created, err := policies.CreatePolicy(context.Background(), &iamv1.CreatePolicyRequest{
+		AccountId: accountID,
+		Name:      "bench-ping",
+		Document: &iamv1.PolicyDocument{Statements: []*iamv1.Statement{{
+			Sid: "ping", Effect: iamv1.Effect_EFFECT_ALLOW,
+			Actions: []string{ActionPing}, Resources: []string{PingResourceARN(testRegion, accountID)},
+		}}},
+	})
+	if err != nil {
+		b.Fatalf("CreatePolicy: %v", err)
+	}
+	if _, err := policies.AttachPolicy(context.Background(), &iamv1.AttachPolicyRequest{
+		PolicyArn:    created.GetPolicy().GetPolicyArn(),
+		PrincipalArn: "arn:dariya:iam:" + testRegion + ":" + accountID + ":user/root",
+	}); err != nil {
+		b.Fatalf("AttachPolicy: %v", err)
+	}
+
+	authorizer := iam.NewAuthorizer(policies, iam.AuthorizerOptions{})
+	return policies, authorizer
+}
+
+func BenchmarkAuthnCachedKeys(b *testing.B) {
+	accounts, cred := benchCredentials(b)
+	cached := control.NewCachingResolver(accounts, control.CacheOptions{})
+
+	h := benchHandler(b,
+		httpx.WithRequestID, httpx.Recover(false), httpx.AccessLog(discard()),
+		authn.Middleware(authn.Config{
+			Keys:    cached,
+			Region:  testRegion,
+			Service: func(*http.Request) string { return ServiceName },
+			Log:     discard(),
+		}),
+	)
+	runBench(b, h, signedBenchRequest(b, cred))
+}
+
+func BenchmarkAuthnAuthzCached(b *testing.B) {
+	accounts, cred := benchCredentials(b)
+
+	key, err := accounts.ResolveSigningKey(context.Background(), cred.AccessKeyID)
+	if err != nil {
+		b.Fatalf("ResolveSigningKey: %v", err)
+	}
+	_, authorizer := benchIAM(b, key.AccountID)
+
+	cached := control.NewCachingResolver(accounts, control.CacheOptions{})
+
+	h := benchHandler(b,
+		httpx.WithRequestID, httpx.Recover(false), httpx.AccessLog(discard()),
+		authn.Middleware(authn.Config{
+			Keys:    cached,
+			Region:  testRegion,
+			Service: func(*http.Request) string { return ServiceName },
+			Log:     discard(),
+		}),
+		authz.Middleware(authz.Config{
+			Decide: authorizer,
+			Target: func(_ *http.Request, p *commonv1.Principal) (authz.Target, error) {
+				return authz.Target{
+					Action:      ActionPing,
+					ResourceARN: PingResourceARN(testRegion, p.GetAccountId()),
+				}, nil
+			},
+			Log: discard(),
+		}),
+	)
+	runBench(b, h, signedBenchRequest(b, cred))
+}
+
+func BenchmarkAuthorizeOnly(b *testing.B) {
+	accounts, cred := benchCredentials(b)
+	key, err := accounts.ResolveSigningKey(context.Background(), cred.AccessKeyID)
+	if err != nil {
+		b.Fatalf("ResolveSigningKey: %v", err)
+	}
+	_, authorizer := benchIAM(b, key.AccountID)
+
+	req := &iamv1.AuthorizeRequest{
+		Principal:   &commonv1.Principal{AccountId: key.AccountID, PrincipalArn: key.PrincipalARN},
+		Action:      ActionPing,
+		ResourceArn: PingResourceARN(testRegion, key.AccountID),
+	}
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			resp, err := authorizer.Authorize(ctx, req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if resp.GetDecision() != iamv1.Decision_DECISION_ALLOW {
+				b.Fatalf("decision = %v", resp.GetDecision())
+			}
+		}
+	})
+}
+
+// The floor for authorization: matching, with nothing around it.
+func BenchmarkEvaluateOnly(b *testing.B) {
+	const account = "000000000001"
+	resource := PingResourceARN(testRegion, account)
+
+	policies := []iam.AttachedPolicy{{
+		PolicyARN: "arn:dariya:iam:hind-1:" + account + ":policy/p",
+		Document: &iamv1.PolicyDocument{Statements: []*iamv1.Statement{{
+			Sid: "ping", Effect: iamv1.Effect_EFFECT_ALLOW,
+			Actions: []string{ActionPing}, Resources: []string{resource},
+		}}},
+	}}
+	req := iam.Request{Action: ActionPing, ResourceARN: resource}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if !iam.Evaluate(policies, req).Allowed() {
+			b.Fatal("denied")
+		}
+	}
 }

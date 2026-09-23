@@ -26,7 +26,9 @@ import (
 
 	commonv1 "dariyanws/gen/dariya/common/v1"
 	controlv1 "dariyanws/gen/dariya/control/v1"
+	iamv1 "dariyanws/gen/dariya/iam/v1"
 	"dariyanws/internal/control"
+	"dariyanws/internal/iam"
 	"dariyanws/internal/secrets"
 	"dariyanws/internal/signing"
 	"dariyanws/internal/store"
@@ -82,7 +84,12 @@ func main() {
 	}
 }
 
-func dial(ctx context.Context) (*control.AccountsServer, func(), error) {
+type plane struct {
+	accounts *control.AccountsServer
+	policies *iam.Server
+}
+
+func dial(ctx context.Context) (*plane, func(), error) {
 	dsn := os.Getenv(envDSN)
 	if dsn == "" {
 		dsn = store.DefaultTestDSN
@@ -102,14 +109,17 @@ func dial(ctx context.Context) (*control.AccountsServer, func(), error) {
 		return nil, nil, fmt.Errorf("%w\n\nGenerate one with `make dev-keys` and export it.", err)
 	}
 
-	return control.NewAccountsServer(st, kr, defaultRegion, time.Now), st.Close, nil
+	return &plane{
+		accounts: control.NewAccountsServer(st, kr, defaultRegion, time.Now),
+		policies: iam.NewServer(st, defaultRegion, time.Now),
+	}, st.Close, nil
 }
 
 // cmdBootstrap is what `make dev-token` runs: one command from empty database to usable
 // credentials, because DESIGN.md decision 4 means nothing at all works without a principal and a
 // painful local setup is how that decision starts getting worked around.
-func cmdBootstrap(ctx context.Context, srv *control.AccountsServer) error {
-	acct, err := srv.CreateAccount(ctx, &controlv1.CreateAccountRequest{
+func cmdBootstrap(ctx context.Context, srv *plane) error {
+	acct, err := srv.accounts.CreateAccount(ctx, &controlv1.CreateAccountRequest{
 		Name:        "dev",
 		ClientToken: bootstrapToken,
 	})
@@ -118,11 +128,19 @@ func cmdBootstrap(ctx context.Context, srv *control.AccountsServer) error {
 	}
 	id := acct.GetAccount().GetAccountId()
 
-	key, err := srv.CreateAccessKey(ctx, &controlv1.CreateAccessKeyRequest{AccountId: id})
+	key, err := srv.accounts.CreateAccessKey(ctx, &controlv1.CreateAccessKeyRequest{AccountId: id})
 	if err != nil {
 		return err
 	}
 	k := key.GetAccessKey()
+
+	// A credential with no policy can do nothing at all — decision 6 means the front door
+	// authorizes every route, and M3.4 exempted none. Bootstrap therefore grants the dev
+	// account's root user everything inside its own account, which is safe because the
+	// cross-account check in Authorize does not depend on the policy being narrow.
+	if err := grantAdmin(ctx, srv, id); err != nil {
+		return err
+	}
 
 	fmt.Printf(`# dev account %s (%s)
 # Credentials are shown once. Re-run `+"`make dev-token`"+` to mint another key.
@@ -135,7 +153,7 @@ export DARIYA_PRINCIPAL_ARN=%s
 	return nil
 }
 
-func cmdAccount(ctx context.Context, srv *control.AccountsServer, args []string) error {
+func cmdAccount(ctx context.Context, srv *plane, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("account: want `create` or `list`")
 	}
@@ -145,7 +163,7 @@ func cmdAccount(ctx context.Context, srv *control.AccountsServer, args []string)
 		name := fs.String("name", "", "account name")
 		_ = fs.Parse(args[1:])
 
-		resp, err := srv.CreateAccount(ctx, &controlv1.CreateAccountRequest{Name: *name})
+		resp, err := srv.accounts.CreateAccount(ctx, &controlv1.CreateAccountRequest{Name: *name})
 		if err != nil {
 			return err
 		}
@@ -156,7 +174,7 @@ func cmdAccount(ctx context.Context, srv *control.AccountsServer, args []string)
 	case "list":
 		token := ""
 		for {
-			resp, err := srv.ListAccounts(ctx, &controlv1.ListAccountsRequest{
+			resp, err := srv.accounts.ListAccounts(ctx, &controlv1.ListAccountsRequest{
 				Page: &commonv1.PageRequest{NextToken: token},
 			})
 			if err != nil {
@@ -175,7 +193,7 @@ func cmdAccount(ctx context.Context, srv *control.AccountsServer, args []string)
 	}
 }
 
-func cmdKey(ctx context.Context, srv *control.AccountsServer, args []string) error {
+func cmdKey(ctx context.Context, srv *plane, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("key: want `create`, `list` or `delete`")
 	}
@@ -186,7 +204,7 @@ func cmdKey(ctx context.Context, srv *control.AccountsServer, args []string) err
 		principal := fs.String("principal", "", "principal ARN (default: the account's root user)")
 		_ = fs.Parse(args[1:])
 
-		resp, err := srv.CreateAccessKey(ctx, &controlv1.CreateAccessKeyRequest{
+		resp, err := srv.accounts.CreateAccessKey(ctx, &controlv1.CreateAccessKeyRequest{
 			AccountId:    *account,
 			PrincipalArn: *principal,
 		})
@@ -206,7 +224,7 @@ func cmdKey(ctx context.Context, srv *control.AccountsServer, args []string) err
 
 		token := ""
 		for {
-			resp, err := srv.ListAccessKeys(ctx, &controlv1.ListAccessKeysRequest{
+			resp, err := srv.accounts.ListAccessKeys(ctx, &controlv1.ListAccessKeysRequest{
 				AccountId: *account,
 				Page:      &commonv1.PageRequest{NextToken: token},
 			})
@@ -226,7 +244,7 @@ func cmdKey(ctx context.Context, srv *control.AccountsServer, args []string) err
 		id := fs.String("id", "", "access key id")
 		_ = fs.Parse(args[1:])
 
-		if _, err := srv.DeleteAccessKey(ctx, &controlv1.DeleteAccessKeyRequest{AccessKeyId: *id}); err != nil {
+		if _, err := srv.accounts.DeleteAccessKey(ctx, &controlv1.DeleteAccessKeyRequest{AccessKeyId: *id}); err != nil {
 			return err
 		}
 		fmt.Printf("deleted %s\n", *id)
@@ -319,4 +337,32 @@ Environment:
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "dariyactl: %v\n", err)
 	os.Exit(1)
+}
+
+// grantAdmin attaches an allow-everything policy to an account's root user.
+//
+// Idempotent through the client token, because bootstrap is expected to be re-run — each run
+// mints a new access key, and re-granting must not be the thing that fails.
+func grantAdmin(ctx context.Context, srv *plane, accountID string) error {
+	created, err := srv.policies.CreatePolicy(ctx, &iamv1.CreatePolicyRequest{
+		AccountId: accountID,
+		Name:      "root-admin",
+		Document: &iamv1.PolicyDocument{Statements: []*iamv1.Statement{{
+			Sid:       "everything-in-this-account",
+			Effect:    iamv1.Effect_EFFECT_ALLOW,
+			Actions:   []string{"*"},
+			Resources: []string{"*"},
+		}}},
+		ClientToken: bootstrapToken + "-policy",
+	})
+	if err != nil {
+		return err
+	}
+
+	// Attaching is idempotent by nature, so a re-run needs no special case.
+	_, err = srv.policies.AttachPolicy(ctx, &iamv1.AttachPolicyRequest{
+		PolicyArn:    created.GetPolicy().GetPolicyArn(),
+		PrincipalArn: fmt.Sprintf("arn:dariya:iam:%s:%s:user/root", defaultRegion, accountID),
+	})
+	return err
 }

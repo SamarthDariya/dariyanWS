@@ -12,8 +12,10 @@ import (
 
 	commonv1 "dariyanws/gen/dariya/common/v1"
 	controlv1 "dariyanws/gen/dariya/control/v1"
+	iamv1 "dariyanws/gen/dariya/iam/v1"
 	"dariyanws/internal/control"
 	"dariyanws/internal/httpx"
+	"dariyanws/internal/iam"
 	"dariyanws/internal/secrets"
 	"dariyanws/internal/signing"
 	"dariyanws/internal/store"
@@ -26,7 +28,7 @@ const testRegion = "hind-1"
 // Deliberately an integration test: M2.1 and M2.2 already cover the pieces in isolation, so what
 // is left to prove is that the assembled thing works — real credentials, real encryption, real
 // signature, real socket.
-func newRegion(t *testing.T) (*httptest.Server, *control.AccountsServer) {
+func newRegion(t *testing.T) (*httptest.Server, *control.AccountsServer, *iam.Server) {
 	t.Helper()
 
 	st := store.OpenTest(t)
@@ -42,7 +44,9 @@ func newRegion(t *testing.T) (*httptest.Server, *control.AccountsServer) {
 	}
 
 	accounts := control.NewAccountsServer(st, kr, testRegion, time.Now)
-	handler, _ := NewHandler(accounts, st, Options{
+	policies := iam.NewServer(st, testRegion, time.Now)
+
+	handler, _ := NewHandler(accounts, policies, st, Options{
 		Region: testRegion,
 		Dev:    false,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -50,7 +54,36 @@ func newRegion(t *testing.T) (*httptest.Server, *control.AccountsServer) {
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return srv, accounts
+	return srv, accounts, policies
+}
+
+// grantPing gives an account's root user the one permission /ping requires.
+//
+// Every test that expects a 200 has to do this now, which is the point of M3.4: nothing is
+// exempt, so a route that works without a policy would be a bug rather than a convenience.
+func grantPing(t *testing.T, policies *iam.Server, accountID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	created, err := policies.CreatePolicy(ctx, &iamv1.CreatePolicyRequest{
+		AccountId: accountID,
+		Name:      "ping",
+		Document: &iamv1.PolicyDocument{Statements: []*iamv1.Statement{{
+			Sid:       "ping",
+			Effect:    iamv1.Effect_EFFECT_ALLOW,
+			Actions:   []string{ActionPing},
+			Resources: []string{PingResourceARN(testRegion, accountID)},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePolicy: %v", err)
+	}
+	if _, err := policies.AttachPolicy(ctx, &iamv1.AttachPolicyRequest{
+		PolicyArn:    created.GetPolicy().GetPolicyArn(),
+		PrincipalArn: "arn:dariya:iam:" + testRegion + ":" + accountID + ":user/root",
+	}); err != nil {
+		t.Fatalf("AttachPolicy: %v", err)
+	}
 }
 
 // credentials mints a real account and access key, exactly as `make dev-token` does.
@@ -97,8 +130,9 @@ func signedGet(t *testing.T, base, path string, cred signing.Credentials) *http.
 // the caller's own account id. Signing, encryption, key resolution, verification and principal
 // propagation all have to work for this to pass.
 func TestSignedPingRoundTrip(t *testing.T) {
-	srv, accounts := newRegion(t)
+	srv, accounts, policies := newRegion(t)
 	accountID, cred := credentials(t, accounts)
+	grantPing(t, policies, accountID)
 
 	resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
 	if err != nil {
@@ -126,7 +160,7 @@ func TestSignedPingRoundTrip(t *testing.T) {
 }
 
 func TestUnsignedPingIsRejected(t *testing.T) {
-	srv, _ := newRegion(t)
+	srv, _, _ := newRegion(t)
 
 	resp, err := http.Get(srv.URL + "/ping")
 	if err != nil {
@@ -152,8 +186,9 @@ func TestUnsignedPingIsRejected(t *testing.T) {
 // front door the two are the same thing; with two they are not, and this test would keep passing
 // while the guarantee quietly weakened.
 func TestDeletedCredentialStopsWorkingAtOnce(t *testing.T) {
-	srv, accounts := newRegion(t)
-	_, cred := credentials(t, accounts)
+	srv, accounts, policies := newRegion(t)
+	acctID, cred := credentials(t, accounts)
+	grantPing(t, policies, acctID)
 
 	resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
 	if err != nil {
@@ -182,7 +217,7 @@ func TestDeletedCredentialStopsWorkingAtOnce(t *testing.T) {
 // Two probes, two jobs. /healthz must not touch the database, or a slow query turns into an
 // orchestrator restarting a process that was serving fine.
 func TestProbes(t *testing.T) {
-	srv, _ := newRegion(t)
+	srv, _, _ := newRegion(t)
 
 	for _, path := range []string{"/healthz", "/readyz"} {
 		resp, err := http.Get(srv.URL + path)
@@ -199,8 +234,9 @@ func TestProbes(t *testing.T) {
 // The tampering case, end to end rather than against a fake: a signature made for one path must
 // not carry a request to another.
 func TestTamperedQueryIsRejected(t *testing.T) {
-	srv, accounts := newRegion(t)
-	_, cred := credentials(t, accounts)
+	srv, accounts, policies := newRegion(t)
+	acctID, cred := credentials(t, accounts)
+	grantPing(t, policies, acctID)
 
 	// The query is covered by the signature just as the path is, and unlike the path it can be
 	// tampered with while still landing on an authenticated route.
@@ -223,6 +259,7 @@ func TestServeDrainsOnCancel(t *testing.T) {
 	st := store.OpenTest(t)
 	handler, _ := NewHandler(
 		control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now),
+		iam.NewServer(st, testRegion, time.Now),
 		st,
 		Options{Region: testRegion, Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
 	)
@@ -300,7 +337,9 @@ func TestKeyCacheIsInThePath(t *testing.T) {
 	store.TruncateAll(t, st)
 
 	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
-	handler, cache := NewHandler(accounts, st, Options{
+	policies := iam.NewServer(st, testRegion, time.Now)
+
+	handler, cache := NewHandler(accounts, policies, st, Options{
 		Region: testRegion,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -311,7 +350,8 @@ func TestKeyCacheIsInThePath(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	_, cred := credentials(t, accounts)
+	acctID, cred := credentials(t, accounts)
+	grantPing(t, policies, acctID)
 
 	for i := 0; i < 20; i++ {
 		resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
@@ -339,12 +379,109 @@ func TestKeyCacheCanBeDisabled(t *testing.T) {
 	st := store.OpenTest(t)
 	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
 
-	_, cache := NewHandler(accounts, st, Options{
+	_, cache := NewHandler(accounts, iam.NewServer(st, testRegion, time.Now), st, Options{
 		Region:          testRegion,
 		DisableKeyCache: true,
 		Log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if cache != nil {
 		t.Error("DisableKeyCache still built a cache")
+	}
+}
+
+// The point of M3.4: a perfectly valid signature is no longer enough. Authentication says who,
+// authorization says whether, and /ping is not exempt from the second question.
+func TestAuthenticatedButUnauthorizedIsForbidden(t *testing.T) {
+	srv, accounts, _ := newRegion(t)
+	_, cred := credentials(t, accounts) // deliberately no grantPing
+
+	resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 403, not 401: the caller proved who they are and was refused anyway. Collapsing the two
+	// would tell a legitimate user their credentials are broken when their permissions are.
+	if resp.StatusCode != http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 403; body = %s", resp.StatusCode, body)
+	}
+
+	var e struct {
+		Code    string            `json:"code"`
+		Details map[string]string `json:"details"`
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &e); err != nil {
+		t.Fatalf("not JSON: %s", body)
+	}
+	if e.Code != "AccessDenied" {
+		t.Errorf("code = %q, want AccessDenied", e.Code)
+	}
+	// Production must not reveal which statement decided, or whether any policy exists at all.
+	if len(e.Details) != 0 {
+		t.Errorf("production leaked policy detail: %v", e.Details)
+	}
+}
+
+// Granting a permission must take effect at once on the process that served the grant, rather
+// than at the end of the policy cache's TTL.
+func TestGrantTakesEffectImmediately(t *testing.T) {
+	srv, accounts, policies := newRegion(t)
+	acctID, cred := credentials(t, accounts)
+
+	resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status before the grant = %d, want 403", resp.StatusCode)
+	}
+
+	grantPing(t, policies, acctID)
+
+	resp, err = http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("status after the grant = %d, want 200; body = %s", resp.StatusCode, body)
+	}
+}
+
+// And revoking must too, in the direction that matters more.
+func TestRevokeTakesEffectImmediately(t *testing.T) {
+	srv, accounts, policies := newRegion(t)
+	acctID, cred := credentials(t, accounts)
+	grantPing(t, policies, acctID)
+
+	resp, err := http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status before the revoke = %d, want 200", resp.StatusCode)
+	}
+
+	if _, err := policies.DeletePolicy(context.Background(), &iamv1.DeletePolicyRequest{
+		PolicyArn: iam.PolicyARN(testRegion, acctID, "ping"),
+	}); err != nil {
+		t.Fatalf("DeletePolicy: %v", err)
+	}
+
+	resp, err = http.DefaultClient.Do(signedGet(t, srv.URL, "/ping", cred))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status after the revoke = %d, want 403 — DeletePolicy must invalidate every "+
+			"principal it was attached to, which it can only do by reading them before the "+
+			"cascade destroys the evidence", resp.StatusCode)
 	}
 }

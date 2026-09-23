@@ -6,8 +6,16 @@ Every other repo here is a system — `dariyaraah` is a request path, `dariyakyu
 `dariyanache` is a cache. This one is what makes them a cloud instead of five unrelated daemons.
 It owns no resources of its own; services own theirs.
 
-**Status: M1 complete.** Accounts, credentials and the signing scheme work end to end from the
-CLI. Nothing listens on a port yet — the front door binds at M2.
+**Status: M3 complete.** The front door listens, authenticates a signed request, and authorizes it
+against IAM policy. Nothing is routed to another service yet — that is M5.
+
+```
+$ sh <(go run ./cmd/dariyactl sign --service ws --url http://127.0.0.1:8080/ping)
+{"account_id":"223850835373","principal_arn":"arn:dariya:iam:hind-1:223850835373:user/root", ...}
+
+$ # the same request from an account with no policy
+{"code":"AccessDenied","message":"not authorized to perform ws:Ping on arn:dariya:ws:..."}
+```
 
 ## What it does
 
@@ -15,7 +23,9 @@ CLI. Nothing listens on a port yet — the front door binds at M2.
   consumers). ARNs, errors, pagination, the event envelope, the capability token.
 - **Front door** — one endpoint. Verifies a signed request, asks IAM once, mints a short-lived
   capability token, proxies to the owning service over gRPC.
-- **Identity** — accounts, access keys, policy documents, and the evaluator.
+- **Identity** — accounts, access keys, policy documents, and the evaluator. Deny wins, the
+  default is deny, and a principal can never touch another account's resources however broad its
+  policy is.
 
 ## Quick start
 
@@ -43,6 +53,10 @@ looks exactly like a signing bug.
 2. `BREAK.md` — the claims `DESIGN.md` makes and has not yet earned. Predictions are written before
    the runs.
 3. `proto/` — the contract.
+
+`BREAK.md` is worth reading even if the code is not: E2 found that one Postgres lookup was 96.4%
+of everything the front door added, and that throughput peaked at exactly the connection pool size
+and then went backwards. Four of five predictions about it were wrong.
 
 ## Layout
 

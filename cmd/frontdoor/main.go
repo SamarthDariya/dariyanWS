@@ -16,6 +16,7 @@ import (
 
 	"dariyanws/internal/control"
 	"dariyanws/internal/frontdoor"
+	"dariyanws/internal/iam"
 	"dariyanws/internal/secrets"
 	"dariyanws/internal/store"
 )
@@ -66,7 +67,9 @@ func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, log *
 	}
 
 	accounts := control.NewAccountsServer(st, kr, region, time.Now)
-	handler, _ := frontdoor.NewHandler(accounts, st, frontdoor.Options{
+	policies := iam.NewServer(st, region, time.Now)
+
+	handler, _ := frontdoor.NewHandler(accounts, policies, st, frontdoor.Options{
 		Region:          region,
 		Dev:             dev,
 		Log:             log,

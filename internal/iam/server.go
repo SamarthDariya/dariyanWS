@@ -33,6 +33,11 @@ type Server struct {
 	store  *store.Store
 	region string
 	now    func() time.Time
+
+	// onPrincipalChanged lets a policy cache drop a principal the moment its permissions change.
+	// Without it an attach would take up to the cache TTL to have any effect, which makes
+	// granting access feel broken and revoking it dangerous.
+	onPrincipalChanged func(principalARN string)
 }
 
 func NewServer(st *store.Store, region string, now func() time.Time) *Server {
@@ -43,6 +48,15 @@ func NewServer(st *store.Store, region string, now func() time.Time) *Server {
 }
 
 // PolicyARN builds the deterministic name for a policy.
+// OnPrincipalChanged registers a callback fired after any change to what a principal may do.
+func (s *Server) OnPrincipalChanged(fn func(principalARN string)) { s.onPrincipalChanged = fn }
+
+func (s *Server) principalChanged(principalARN string) {
+	if s.onPrincipalChanged != nil {
+		s.onPrincipalChanged(principalARN)
+	}
+}
+
 func PolicyARN(region, accountID, name string) string {
 	return fmt.Sprintf("arn:dariya:iam:%s:%s:policy/%s", region, accountID, name)
 }
@@ -196,6 +210,15 @@ func (s *Server) ListPolicies(ctx context.Context, req *iamv1.ListPoliciesReques
 // nothing but look like they grant something, and must not require the caller to detach first —
 // a two-step revocation is a revocation that gets half done.
 func (s *Server) DeletePolicy(ctx context.Context, req *iamv1.DeletePolicyRequest) (*iamv1.DeletePolicyResponse, error) {
+	// Who is affected has to be read BEFORE the delete, because the cascade destroys the evidence.
+	// Reading it afterwards would find nothing and leave every affected principal holding cached
+	// permissions from a policy that no longer exists — the exact case where a stale cache is
+	// most dangerous.
+	affected, err := s.principalsAttachedTo(ctx, req.GetPolicyArn())
+	if err != nil {
+		return nil, err
+	}
+
 	tag, err := s.store.Pool().Exec(ctx, `DELETE FROM policies WHERE policy_arn = $1`, req.GetPolicyArn())
 	if err != nil {
 		return nil, apierr.Internal(err, "could not delete the policy")
@@ -203,7 +226,30 @@ func (s *Server) DeletePolicy(ctx context.Context, req *iamv1.DeletePolicyReques
 	if tag.RowsAffected() == 0 {
 		return nil, apierr.NotFound("no policy %s", req.GetPolicyArn())
 	}
+
+	for _, principalARN := range affected {
+		s.principalChanged(principalARN)
+	}
 	return &iamv1.DeletePolicyResponse{}, nil
+}
+
+func (s *Server) principalsAttachedTo(ctx context.Context, policyARN string) ([]string, error) {
+	rows, err := s.store.Pool().Query(ctx,
+		`SELECT principal_arn FROM policy_attachments WHERE policy_arn = $1`, policyARN)
+	if err != nil {
+		return nil, apierr.Internal(err, "could not read policy attachments")
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var principalARN string
+		if err := rows.Scan(&principalARN); err != nil {
+			return nil, apierr.Internal(err, "could not scan a policy attachment")
+		}
+		out = append(out, principalARN)
+	}
+	return out, rows.Err()
 }
 
 // AttachPolicy binds a policy to a principal.
@@ -238,6 +284,7 @@ func (s *Server) AttachPolicy(ctx context.Context, req *iamv1.AttachPolicyReques
 		req.GetPolicyArn(), req.GetPrincipalArn(), s.now().UnixMilli()); err != nil {
 		return nil, apierr.Internal(err, "could not attach the policy")
 	}
+	s.principalChanged(req.GetPrincipalArn())
 	return &iamv1.AttachPolicyResponse{}, nil
 }
 
@@ -256,6 +303,7 @@ func (s *Server) DetachPolicy(ctx context.Context, req *iamv1.DetachPolicyReques
 		return nil, apierr.NotFound("policy %s is not attached to %s",
 			req.GetPolicyArn(), req.GetPrincipalArn())
 	}
+	s.principalChanged(req.GetPrincipalArn())
 	return &iamv1.DetachPolicyResponse{}, nil
 }
 

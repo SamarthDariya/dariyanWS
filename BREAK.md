@@ -221,6 +221,49 @@ binary rather than the control being a previous commit.
 
 ---
 
+## E2c — what authorization costs, now that nothing is exempt
+
+**The claim** (M3.4): making every route ask IAM is affordable, given the policy lookup gets the
+same cache treatment the credential lookup got.
+
+**Predicted** (before running, after E2 taught the shape): authorization adds roughly what
+authentication does minus the HMAC — call it 2-4 µs — and the pure matching is invisible.
+
+**Measured** (same run, same machine, in-process so nothing is loopback):
+
+| | ns/op | allocs | added |
+|---|---|---|---|
+| bare handler | 1,700 | 24 | — |
+| + plumbing | 4,330 | 41 | +2,630 |
+| + authn, key from memory | 6,959 | 71 | +2,629 |
+| + authn, key from cache | 8,423 | 71 | +1,464 |
+| + authz, policies cached | **10,465** | 79 | **+2,042** |
+
+Isolated: `Authorize` with a warm cache **404 ns**; `Evaluate` — the pure matching, no cache, no
+proto, no ARN parsing — **65.6 ns**.
+
+**Right about** the magnitude: 2,042 ns against a predicted 2-4 µs, and the matching really is
+invisible at 0.6% of the request.
+
+**The two things worth keeping:**
+
+1. **The authz middleware costs 5× the decision it wraps.** `Authorize` is 404 ns; getting to it
+   costs 2,042 ns. The difference is building the `AuthorizeRequest` proto, resolving the target,
+   and parsing two ARNs — per request, to ask a question answered in 66 ns of actual matching. If
+   this ever matters, the fix is not a faster evaluator.
+
+2. **The cache's own lock is now a visible term.** A resolver reading from a plain map costs
+   6,959 ns; the same lookup through `ttlcache` costs 8,423 — **+1,464 ns for an RWMutex read and
+   a `time.Now`**, under eight goroutines hammering one key. That is E2's lesson one level down:
+   the pool stopped being the ceiling and the shared lock is what is underneath it. Not worth
+   fixing at these numbers, and worth knowing before someone concludes a cache is free.
+
+**Not measured:** the network sweep was not repeated. E2b's caveat forbids comparing it to a
+remembered number, and re-running the whole matrix to learn what an in-process benchmark already
+answered precisely would be ritual rather than measurement.
+
+---
+
 ## E3 — The poll latency that decision 7 accepted
 
 **The claim** (DESIGN.md decision 7): polling costs "tens of ms at best" and long-polling recovers
