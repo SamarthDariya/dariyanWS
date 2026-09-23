@@ -6,7 +6,8 @@ Every other repo here is a system — `dariyaraah` is a request path, `dariyakyu
 `dariyanache` is a cache. This one is what makes them a cloud instead of five unrelated daemons.
 It owns no resources of its own; services own theirs.
 
-**Status: M0.** Contract and skeleton only. Nothing serves yet.
+**Status: M1 complete.** Accounts, credentials and the signing scheme work end to end from the
+CLI. Nothing listens on a port yet — the front door binds at M2.
 
 ## What it does
 
@@ -19,11 +20,21 @@ It owns no resources of its own; services own theirs.
 ## Quick start
 
 ```sh
-make tools      # buf + protoc plugins, into $(go env GOPATH)/bin
-make proto      # regenerate gen/
-make build
-make region-up  # Postgres on :55432
+make tools                        # buf + protoc plugins, into $(go env GOPATH)/bin
+make proto                        # regenerate gen/
+make region-up                    # Postgres on :55432
+eval "$(make -s dev-keys)"        # master key for credential encryption — keep it
+eval "$(make -s dev-token)"       # seed the dev account, mint a key
+make test                         # integration tests skip if the region is down
+
+# a signed request, ready to paste once the front door listens at M2
+go run ./cmd/dariyactl sign --service func --url http://localhost:8080/ping
 ```
+
+Credentials are encrypted at rest under `DARIYA_MASTER_KEYS`, not hashed — verifying a signature
+means recomputing an HMAC, which needs the secret back. `make dev-keys` prints a **new** key every
+run; export it once and keep it, or previously minted credentials stop decrypting in a way that
+looks exactly like a signing bug.
 
 ## Reading order
 
