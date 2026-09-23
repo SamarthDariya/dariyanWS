@@ -25,10 +25,8 @@ func fixedClock(ms int64) Clock {
 func newTestServer(t *testing.T) *AccountsServer {
 	t.Helper()
 	st := store.OpenTest(t)
-	if _, err := st.Pool().Exec(context.Background(),
-		`TRUNCATE access_keys, accounts, idempotency`); err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
+	store.TruncateAll(t, st)
+
 	return NewAccountsServer(st, testKeyring(t), testRegion, fixedClock(1_700_000_000_000))
 }
 

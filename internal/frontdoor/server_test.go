@@ -30,10 +30,7 @@ func newRegion(t *testing.T) (*httptest.Server, *control.AccountsServer) {
 	t.Helper()
 
 	st := store.OpenTest(t)
-	if _, err := st.Pool().Exec(context.Background(),
-		`TRUNCATE access_keys, accounts, idempotency`); err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
+	store.TruncateAll(t, st)
 
 	key, err := secrets.GenerateKey()
 	if err != nil {
@@ -300,10 +297,7 @@ func fixedPrincipal() *commonv1.Principal {
 // rather than against the resolver, because the wiring is the part that can silently be missing.
 func TestKeyCacheIsInThePath(t *testing.T) {
 	st := store.OpenTest(t)
-	if _, err := st.Pool().Exec(context.Background(),
-		`TRUNCATE access_keys, accounts, idempotency`); err != nil {
-		t.Fatalf("truncate: %v", err)
-	}
+	store.TruncateAll(t, st)
 
 	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
 	handler, cache := NewHandler(accounts, st, Options{

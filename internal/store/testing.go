@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -34,4 +36,43 @@ func OpenTest(t *testing.T) *Store {
 		t.Fatalf("migrate: %v", err)
 	}
 	return st
+}
+
+// TruncateAll empties every table except the migration bookkeeping.
+//
+// Discovered from the catalogue rather than listed, because a hand-written list has to be edited
+// in every test file each time a table is added — which is exactly how adding migration 0002
+// broke six tests in a package that has nothing to do with policies. CASCADE is required now that
+// tables reference each other, and is safe here because the statement covers every table anyway.
+func TruncateAll(t *testing.T, st *Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	rows, err := st.Pool().Query(ctx,
+		`SELECT tablename FROM pg_tables
+		  WHERE schemaname = 'public' AND tablename <> 'schema_migrations'`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan table name: %v", err)
+		}
+		tables = append(tables, `"`+name+`"`)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	if len(tables) == 0 {
+		return
+	}
+
+	if _, err := st.Pool().Exec(ctx,
+		fmt.Sprintf("TRUNCATE %s CASCADE", strings.Join(tables, ", "))); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
 }

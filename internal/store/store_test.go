@@ -14,13 +14,20 @@ func TestMigrateIsIdempotent(t *testing.T) {
 		t.Fatalf("second Migrate: %v", err)
 	}
 
+	// Counted against the embedded set rather than a literal: a literal here means every new
+	// migration breaks a test that has nothing to say about it.
+	names, err := migrationNames()
+	if err != nil {
+		t.Fatalf("migrationNames: %v", err)
+	}
+
 	var n int
 	if err := st.Pool().QueryRow(ctx,
 		`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("schema_migrations has %d rows, want 1", n)
+	if n != len(names) {
+		t.Errorf("schema_migrations has %d rows, want %d", n, len(names))
 	}
 }
 
