@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	commonv1 "dariyanws/gen/dariya/common/v1"
 	controlv1 "dariyanws/gen/dariya/control/v1"
 	"dariyanws/internal/control"
 	"dariyanws/internal/httpx"
@@ -250,4 +251,40 @@ func testKeyring(t *testing.T) *secrets.Keyring {
 		t.Fatalf("NewKeyring: %v", err)
 	}
 	return kr
+}
+
+// Benchmark helpers. Kept beside the tests because they share the region fixture, and separated
+// from it because a benchmark must not truncate tables out from under a parallel test.
+
+func openBenchStore(b *testing.B) *store.Store {
+	b.Helper()
+	st, err := store.Open(context.Background(), store.DefaultTestDSN)
+	if err != nil {
+		b.Skipf("no Postgres: %v — run `make region-up`", err)
+	}
+	b.Cleanup(st.Close)
+	if err := st.Migrate(context.Background()); err != nil {
+		b.Fatalf("migrate: %v", err)
+	}
+	return st
+}
+
+func benchKeyring(b *testing.B) *secrets.Keyring {
+	b.Helper()
+	key, err := secrets.GenerateKey()
+	if err != nil {
+		b.Fatalf("GenerateKey: %v", err)
+	}
+	kr, err := secrets.NewKeyring(map[string][]byte{"bench": key}, "bench")
+	if err != nil {
+		b.Fatalf("NewKeyring: %v", err)
+	}
+	return kr
+}
+
+func fixedPrincipal() *commonv1.Principal {
+	return &commonv1.Principal{
+		AccountId:    "000000000000",
+		PrincipalArn: "arn:dariya:iam:hind-1:000000000000:user/root",
+	}
 }

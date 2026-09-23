@@ -84,9 +84,88 @@ because unit 0 found that unpredicted experiments quietly become most of them._
    binding constraint rather than threads.
 5. **B's absolute throughput at 64 connections: ~6,000-9,000 rps**, capped by the default pgx pool.
 
-**Measured:**
+**Measured** (2026-09-23, Intel i5-1038NG7 @ 2.0GHz, 8 logical CPUs, GOMAXPROCS=8, Postgres 17 in
+Docker on loopback, pgx pool max_conns=8; 2s warm-up, 10s measured, zero rejected responses in
+every run):
+
+| connections | A bare rps | A p50 | B front door rps | B p50 | B p99 | ratio |
+|---|---|---|---|---|---|---|
+| 1 | 9,849 | 0.082 ms | 952 | 0.831 ms | 2.88 ms | **10.3×** |
+| 8 | 63,411 | 0.102 ms | 4,536 | 1.655 ms | 3.77 ms | **14.0×** |
+| 64 | 87,751 | 0.457 ms | **2,666** | 22.8 ms | 44.8 ms | **32.9×** |
+
+Where the time goes, in process, one term removed at a time:
+
+| | ns/op | allocs | added by this layer |
+|---|---|---|---|
+| bare handler | 1,703 | 24 | — |
+| + request id, recover, access log | 3,943 | 41 | +2,240 ns |
+| + authentication, key from memory | 8,234 | 71 | +4,291 ns |
+| + authentication, key from Postgres | 180,938 | 89 | **+172,704 ns** |
+
+Isolated: `signing.Verify` alone **2,484 ns**; `ResolveSigningKey` alone **165,250 ns**.
+
+**Of the front door's added cost, the Postgres lookup is 96.4%.** Signature verification is 2.4%,
+and all the plumbing together is 1.3%.
 
 **Wrong about:**
+
+1. **The ratio widens with concurrency; I said it would narrow.** Predicted 3-4× at 64 connections,
+   measured 32.9×. The reasoning was wrong in a specific way: I pictured A as latency-bound per
+   connection and B as pool-bound, converging. In fact A keeps scaling (9.8k → 87.7k rps) while B
+   **peaks at 8 connections and then goes backwards** — 4,536 rps at 8, 2,666 at 64. Not a plateau,
+   a collapse.
+
+2. **Throughput at 64 connections: predicted 6,000-9,000 rps, measured 2,666.** Wrong by 3×, and
+   wrong on the side that matters — I predicted saturation and got degradation.
+
+3. **Plumbing: predicted ~10% of the added cost, measured 1.3%.** Nearly an order of magnitude out.
+   Request id, panic recovery and the access log are nearly free next to a database round trip; I
+   was pattern-matching on "middleware is expensive" rather than doing the arithmetic.
+
+4. **The database share was higher than predicted** — 96.4% against a predicted 85-90%. Directionally
+   right, and the residual was smaller than I allowed for.
+
+**Right about:** the HMAC being invisible (2,484 ns, 1.4% of the total). Though for the wrong
+reason: most of those 2,484 ns is building the canonical string and its 21 allocations, not the
+hash. The hash itself does not appear.
+
+### What the number actually says
+
+**Little's law holds exactly, and it is the whole explanation.** `dariyaraah`'s thesis was that
+throughput is concurrency ÷ latency and the server only chooses the concurrency:
+
+- 8 connections: 8 ÷ 1.655 ms = 4,834 rps predicted, **4,536 measured**
+- 64 connections: 64 ÷ 22.8 ms = 2,806 rps predicted, **2,666 measured**
+
+So nothing mysterious is happening — B is a closed-loop system obeying the same law unit 1 derived.
+What makes throughput *fall* is that latency grew **13.8×** while concurrency grew only 8×. Past the
+pool size, an extra connection does not buy a slot; it joins a queue, and the queueing is
+super-linear. **The pool is exactly 8, GOMAXPROCS is exactly 8, and B's peak is exactly at 8
+connections.** That is not a coincidence, it is the binding constraint made visible.
+
+This is the unit 0 / unit 1 result arriving in a new costume: the concurrency ceiling is not
+goroutines, which are cheap. It is the Postgres pool that every signed request passes through — as
+`internal/frontdoor`'s package comment predicted, which is the one part of the prediction that held.
+
+### The fix the number chooses
+
+M2's plan committed in advance to letting the measurement decide, and it has: **cache the
+credential lookup.** 96.4% of the added cost is one query that returns the same row for every
+request from the same caller.
+
+What it costs, stated before building it: a cached credential outlives its revocation by the TTL.
+That is the same trade already accepted for capability tokens in decision 6, bounded the same way,
+and the M2.3 test `TestDeletedCredentialStopsWorkingAtOnce` will have to be rewritten to assert a
+bounded window rather than immediacy — which is a real weakening, not a refactor.
+
+**E2b measures the same sweep with the cache in place.** Prediction, before building: the ratio at
+64 connections falls from 32.9× to under 3×, B's throughput stops going backwards, and the new
+dominant term becomes the 4,291 ns signature-verification path.
+
+**Noise to ignore:** A's `max` of 351 ms at 8 connections against a p999 of 1.1 ms is a single
+outlier, almost certainly a GC pause or a scheduler stall on the load generator's own machine. The
+percentiles are bounded in every run, so no distribution was truncated.
 
 ---
 
