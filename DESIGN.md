@@ -146,6 +146,13 @@ as a *second* auth path for temporary credentials, once signing works.
 **Known hazard:** clock skew and canonicalisation bugs both surface as an opaque 403. The front door
 returns which check failed when `DARIYA_DEV=1`, or an evening goes to a trailing slash.
 
+**Known gap (M2.4), stated rather than hidden:** there is no nonce and no replay cache, so a
+signed request can be replayed without limit inside its five-minute window. SigV4 has the same
+property and leans on TLS plus the window to contain it. It is what makes the C++ benchmark
+possible at all — one signed request, replayed by every connection — and the cost is that a
+captured request is reusable for five minutes. Fixing it means a seen-nonce cache at the front
+door, which is state on the hot path, so it waits for a reason.
+
 **Known gap (M1.4), stated rather than hidden:** the `Host` header is not signed, so a signature is
 valid against any endpoint sharing the credential scope's region and service. With one front door
 there is nowhere else to replay it to. It becomes real the moment a second endpoint serves the same

@@ -2,6 +2,13 @@
 /bin/
 /dist/
 
+# CMake build trees, wherever they are. The C++ client builds out of source and the vendored rig
+# builds inside it; none of it belongs in a diff.
+build/
+build-asan/
+build-tsan/
+compile_commands.json
+
 # Generated from proto/ — regenerate with `make proto`.
 # Checked OUT of the tree on purpose: generated code in review diffs hides the change that caused it.
 /gen/

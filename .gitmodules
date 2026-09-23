@@ -1,0 +1,3 @@
+[submodule "clients/cpp/vendor/dariyanaap"]
+	path = clients/cpp/vendor/dariyanaap
+	url = https://github.com/SamarthDariya/dariyanaap.git

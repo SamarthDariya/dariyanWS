@@ -41,6 +41,20 @@ test-integration: region-up
 	@until docker exec dariya-postgres pg_isready -U dariya -d dariyanws >/dev/null 2>&1; do sleep 0.5; done
 	go test ./... -count=1
 
+## cpp: build the C++ client and the signed load generator
+cpp:
+	git submodule update --init --recursive
+	cmake -S clients/cpp -B clients/cpp/build
+	cmake --build clients/cpp/build -j4
+
+## cpp-test: prove the C++ signer agrees with the Go one, byte for byte
+cpp-test: cpp
+	./clients/cpp/build/vector_test
+
+## vectors: regenerate the cross-language signing vectors (changes the wire format)
+vectors:
+	UPDATE_VECTORS=1 go test ./internal/signing -run TestSigningVectors -count=1
+
 ## region-up: boot the region (Postgres now; front door from M2)
 region-up:
 	docker compose -f deploy/docker-compose.yml up -d
@@ -67,4 +81,4 @@ dev-token:
 		exit 1; }
 	@go run ./cmd/dariyactl bootstrap
 
-.PHONY: help tools proto lint breaking build test test-integration region-up region-down region-nuke dev-keys dev-token
+.PHONY: help tools proto lint breaking build test test-integration cpp cpp-test vectors region-up region-down region-nuke dev-keys dev-token
