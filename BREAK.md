@@ -17,20 +17,56 @@ They are four independent claims that DESIGN.md makes and has not earned.
 ## E1 — Static stability: the data plane outlives the control plane ★
 
 **The claim** (DESIGN.md decision 6): with capability tokens verified offline, killing `dariyanWS`
-does not stop in-flight or subsequent `Invoke` calls against an already-warm data plane. Only *new*
-authorisation stops.
+does not stop `Invoke` calls against an already-warm data plane. Only *new* authorisation stops.
 
-This is the experiment the whole project is built around. If it fails, decision 6 bought nothing and
-the honest move is to say so here rather than to quietly fix the harness.
+This is the experiment the whole project is built around. If it fails, decision 6 bought nothing
+and the honest move is to say so here rather than to quietly fix the harness.
 
-**Setup:** steady invoke load through the front door; at t=30s `docker kill` the front-door and IAM
-containers; keep the load running against the service directly with a token minted before the kill.
+### The claim is weaker than DESIGN.md made it sound, and that was known before running
+
+Writing M5.3 made something structural visible: **capabilities are minted per request.** With the
+front door dead, no new capability can exist, so only a caller already holding one can proceed —
+for at most the capability TTL, thirty seconds.
+
+That is a much weaker property than the thing it was modelled on. An EC2 instance runs for months
+without the EC2 control plane; this data plane serves for half a minute. What the experiment can
+honestly establish is the narrower claim: **the data path has no synchronous dependency on the
+control plane.** That is worth establishing — it is the precondition for every stronger version —
+but it is not static stability, and the write-up must not let the two blur.
+
+The alternative was to change what a capability is first, scoping it to (principal, action,
+resource) instead of to one request so a client could hold and reuse one. Deliberately not done:
+redesigning a system so an experiment reads better is the wrong order, and the gap between the
+claim and the reality is exactly what this file is for.
+
+**Setup:** front door, IAM, Postgres and a guarded `cmd/echo` all running. Measure the data plane
+directly, holding a valid capability. Then `docker stop` Postgres and kill the front door, leaving
+only the data plane. Measure again with the same capability. Then wait past the TTL and measure a
+third time.
+
+A capability has to be obtained out of band, because by design one never reaches a client — the
+front door mints it inward only. `dariyactl mint-capability` does what the front door does, with
+the same key and the same claims. That is a real gap in the experiment's fidelity and is named
+here rather than hidden: it proves the data plane honours a valid capability with the control
+plane gone, not that a client could have got one.
 
 **Predicted — Samarth:**
-_(write before running)_
+_Deferred to Claude, as for E2. Recorded rather than left blank._
 
-**Predicted — Claude:**
-_(written before the run; left blank until E1's setup exists, so it cannot anchor the line above)_
+**Predicted — Claude** (written 2026-09-24, before the harness existed):
+
+1. **It keeps serving.** Yes, unambiguously — the verify path touches a public key held in memory
+   and nothing else.
+2. **Latency is unchanged, within noise.** If anything is being consulted that I have not noticed,
+   this is where it shows: a dependency that is present but fast still moves the mean. I predict
+   the difference between before and after is under 5%.
+3. **The window is exactly the TTL**, 30s, because it is a constant and not an emergent property.
+   Past it every request becomes a 403 whose cause is `ErrExpired`.
+4. **No hidden dependency.** The data plane reads its public keys once at startup, holds no
+   database handle, and makes no outbound call. I would be surprised to be wrong, and being
+   surprised here would be the most valuable outcome available.
+5. **Killing the front door mid-flight does not disturb the data plane** — no connection churn, no
+   error burst, nothing in its log beyond the requests it is already serving.
 
 **Measured:**
 
