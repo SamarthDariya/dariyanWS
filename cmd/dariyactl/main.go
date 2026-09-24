@@ -28,6 +28,8 @@ import (
 	commonv1 "dariyanws/gen/dariya/common/v1"
 	controlv1 "dariyanws/gen/dariya/control/v1"
 	iamv1 "dariyanws/gen/dariya/iam/v1"
+	"google.golang.org/protobuf/proto"
+
 	"dariyanws/internal/capability"
 	"dariyanws/internal/control"
 	"dariyanws/internal/iam"
@@ -57,6 +59,13 @@ func main() {
 	// keygen and sign are pure and need no database, so they are handled before anything
 	// connects — keygen in particular has to work on a machine where nothing is running yet,
 	// since its output is what makes the rest runnable.
+	if os.Args[1] == "mint-capability" {
+		if err := cmdMintCapability(os.Args[2:]); err != nil {
+			fatal(err)
+		}
+		return
+	}
+
 	if os.Args[1] == "keygen" {
 		if err := cmdKeygen(); err != nil {
 			fatal(err)
@@ -340,6 +349,7 @@ func usage() {
   dariyactl key delete --id KEYID
   dariyactl sign --service SVC --url URL [--method M] [--body B]
   dariyactl keygen
+  dariyactl mint-capability --action A --resource ARN --account ID [--principal ARN]
 
 Environment:
   DARIYA_DSN            Postgres DSN (default: the local region)
@@ -401,5 +411,58 @@ func cmdKeygen() error {
 	fmt.Fprintln(os.Stderr,
 		"# Keep these. Credentials encrypted under a previous master key stop decrypting, and "+
 			"tokens signed by a previous key stop verifying.")
+	return nil
+}
+
+// cmdMintCapability produces a capability the way the front door does.
+//
+// It exists for BREAK.md E1, and the reason it has to exist is itself a finding: a capability
+// never reaches a client, by design — the front door mints it inward only. An experiment that
+// needs a caller to hold one therefore cannot get it from the system, and has to mint it out of
+// band with the same key.
+//
+// That is a gap in the experiment's fidelity, not a feature. It proves the data plane honours a
+// valid capability with the control plane gone; it does not prove a client could have obtained
+// one. The distinction is recorded in BREAK.md rather than papered over here.
+func cmdMintCapability(args []string) error {
+	fs := flag.NewFlagSet("mint-capability", flag.ExitOnError)
+	action := fs.String("action", "", "service-qualified action, e.g. func:Invoke")
+	resource := fs.String("resource", "", "fully-resolved resource ARN")
+	account := fs.String("account", envOr("DARIYA_ACCOUNT_ID", ""), "account that owns the resource")
+	principalARN := fs.String("principal", envOr("DARIYA_PRINCIPAL_ARN", ""), "principal the capability is for")
+	ttl := fs.Duration("ttl", capability.DefaultTTL, "how long the capability is valid")
+	_ = fs.Parse(args)
+
+	if *action == "" || *resource == "" || *account == "" {
+		return fmt.Errorf("mint-capability: --action, --resource and --account are required")
+	}
+	if *principalARN == "" {
+		*principalARN = fmt.Sprintf("arn:dariya:iam:%s:%s:user/root", defaultRegion, *account)
+	}
+
+	minter, err := capability.NewMinterFromEnv(*ttl)
+	if err != nil {
+		return err
+	}
+
+	token, err := minter.Mint(capability.Claims{
+		AccountID:    *account,
+		PrincipalARN: *principalARN,
+		Action:       *action,
+		ResourceARN:  *resource,
+		RequestID:    "e1-" + fmt.Sprint(time.Now().UnixNano()),
+	})
+	if err != nil {
+		return err
+	}
+
+	encoded, err := proto.Marshal(token)
+	if err != nil {
+		return err
+	}
+
+	// Just the header value, so it can be piped straight into curl.
+	fmt.Println(base64.StdEncoding.EncodeToString(encoded))
+	fmt.Fprintf(os.Stderr, "# valid for %s\n", *ttl)
 	return nil
 }

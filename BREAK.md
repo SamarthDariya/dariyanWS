@@ -68,9 +68,65 @@ _Deferred to Claude, as for E2. Recorded rather than left blank._
 5. **Killing the front door mid-flight does not disturb the data plane** — no connection churn, no
    error burst, nothing in its log beyond the requests it is already serving.
 
-**Measured:**
+**Measured** (2026-09-24, same machine; 200 requests per phase, direct to the data plane, same
+capability throughout, TTL shortened to 10s so phase 3 did not dominate the run):
 
-**Wrong about:**
+| phase | control plane | statuses | mean | p50 | p99 |
+|---|---|---|---|---|---|
+| 1 | up | **200× 200 OK** | 0.882 ms | 0.885 ms | 1.147 ms |
+| 2 | **front door killed, Postgres stopped** | **200× 200 OK** | 0.887 ms | 0.891 ms | 1.128 ms |
+| 3 | still down, capability expired | 200× 403 | 1.076 ms | 0.918 ms | 1.781 ms |
+
+Phase 2 ran with the front door `kill -9`'d and the Postgres container stopped. `curl` on the
+front door's port returned `Failed to connect`. The data plane served every request.
+
+```
+error="capability: token has expired: expired at 1790249824936"
+```
+
+**Wrong about: nothing. Five predictions, five correct.**
+
+1. It kept serving — 200 of 200.
+2. Latency unchanged: **+0.57%** against a predicted "under 5%". The p99 was marginally *lower*
+   with the control plane down, which is noise, but noise in the right direction: there was
+   nothing being consulted for its absence to speed up.
+3. The window was exactly the TTL, and expiry produced `ErrExpired` as a 403.
+4. No hidden dependency surfaced.
+5. Killing the front door mid-flight disturbed nothing.
+
+### What this establishes, stated no more strongly than it should be
+
+**The data path has no synchronous dependency on the control plane.** That is now measured rather
+than claimed, and 0.57% is a tighter bound than "it seemed to work" — a dependency that existed
+but was fast would have moved the mean, and nothing moved.
+
+**It is not static stability.** The window is thirty seconds because a capability is minted per
+request and carries a thirty-second expiry. An EC2 instance runs for months without the EC2
+control plane; this serves until the token in flight expires. What decision 6 bought is the
+precondition for static stability, not the property itself.
+
+### A caveat that matters, and a note on the score
+
+The capability was minted by `dariyactl`, not obtained from the running system, because by design
+a capability never reaches a client. So phase 2 proves the **data plane** honours a valid
+capability with the control plane gone. It does not prove a **client** could have been holding
+one — with the front door dead, nothing mints new ones, and a caller who arrives thirty-one
+seconds late is simply stuck.
+
+On the perfect score: it is worth less than E2's four misses were worth. E1 predicted a binary
+"nothing happens" about a code path with no network calls in it, which is the easiest kind of
+prediction there is; E2 predicted performance under concurrency and got the *direction* wrong.
+Five for five here is not evidence that calibration improved. The genuinely informative number
+remains the 0.57%, which was a quantitative prediction and landed.
+
+### What would make the stronger claim true
+
+Scope a capability to (principal, action, resource) rather than to one request, so a caller can
+hold and reuse one, and give it a refresh path that fails open for the length of a cache rather
+than closed at an expiry. Then the data plane's independence is bounded by the refresh interval
+rather than by a single request's lifetime, and the question becomes an interesting one: how long
+should a service keep honouring a decision nobody can re-confirm? That is worth its own unit and
+is deliberately not smuggled into this one.
 
 ---
 

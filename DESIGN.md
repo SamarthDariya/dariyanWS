@@ -199,6 +199,16 @@ verification is what makes static stability real here rather than a claim.
 Secondary wins: zero extra hops on the hot path, and a public key in each service means there is no
 shared secret sitting in a C++ repo.
 
+**Amendment (M5.4), narrowing the claim to what was measured.** E1 ran: the data plane served 200
+of 200 requests with the front door `kill -9`'d and Postgres stopped, at +0.57% latency. What that
+establishes is that **the data path has no synchronous dependency on the control plane** —
+measured, not asserted.
+
+It does not establish static stability, and this decision should not be read as claiming it.
+Capabilities are minted per request with a thirty-second expiry, so the data plane's independence
+lasts only until the token in flight expires. An EC2 instance runs for months without its control
+plane. What decision 6 bought is the precondition for that property, not the property itself.
+
 Costs, to be written up rather than engineered around:
 
 - The front door is **fully trusted for authz**. A bug there is a cross-tenant breach, not a 403.
