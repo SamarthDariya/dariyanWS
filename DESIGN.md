@@ -250,6 +250,46 @@ create/read/update/delete/list, a state machine, stabilisation polling, rollback
 That is a good standalone build and it gets its own repo. Trying to be both the registry of record
 and the orchestrator is what made the design awkward in the first place.
 
+### 12. Console sign-in is a second authentication scheme, not a second authorisation path.
+
+Parked at M5 and taken at M6.2. A browser cannot hold an access key secret: it would live in
+localStorage, in memory, and in reach of every XSS. So the console exchanges the secret once, at
+sign-in, for an httpOnly cookie.
+
+The invariant that makes this safe to add: **two ways to prove who you are, one way to decide what
+you may do.** A signature and a session both resolve to the same `Principal`, and everything
+downstream — IAM, the capability token, the proxy — cannot tell which was used.
+
+**Rejected: a BFF holding credentials server-side and talking to the control plane out of band.**
+Simpler, and the console would then prove nothing about the auth model, because it would not be
+using it.
+
+**Rejected: a separate console password, as AWS has.** More faithful, and it means a second
+credential store with password hashing and its own recovery story. A session is deliberately not a
+new tier of credential — anyone holding the key pair can already do everything the session can, so
+it is an envelope around an existing credential rather than a new one.
+
+Sessions are **server-side**, not self-contained tokens, because sign-out has to work. A stateless
+session cannot be revoked before it expires, and a "sign out" that leaves a working credential in
+the browser for twelve more hours is a lie told to the person clicking it.
+
+The token is stored as a **SHA-256 hash**, and the contrast with decision 10 is instructive:
+an access key secret cannot be hashed because verifying a signature means recomputing an HMAC and
+needing the secret back, whereas a session token is checked by equality. Where hashing is
+possible it is used.
+
+**Costs, named rather than discovered:**
+
+- **Sign-in is the only unauthenticated route in the system**, and it is the one place a secret
+  arrives in a request body instead of being used to sign one. It needs a rate limit before this
+  is exposed beyond localhost; unit 7 is where that arrives.
+- **`Secure` is off in dev**, because local development is http and a Secure cookie would simply
+  never be sent — presenting as "sign-in works and then nothing is authenticated". It is bound to
+  the same flag that already loosens error detail, so there is one switch to get wrong, not two.
+- CSRF rests on `SameSite=Strict` plus a token returned in the sign-in *body* and echoed in a
+  header on mutating requests. In a cookie it would be sent automatically by exactly the forged
+  request it exists to stop.
+
 ### 9. Reserved: what the second service forced.
 
 Left empty on purpose. The contract is currently validated by exactly one consumer, which validates

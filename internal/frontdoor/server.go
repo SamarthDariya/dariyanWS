@@ -30,6 +30,7 @@ import (
 	"dariyanws/internal/iam"
 	"dariyanws/internal/proxy"
 	"dariyanws/internal/router"
+	"dariyanws/internal/session"
 	"dariyanws/internal/store"
 )
 
@@ -81,6 +82,9 @@ type Options struct {
 	// capability.DefaultTTL.
 	CapabilityTTL time.Duration
 
+	// SessionTTL is how long a console session lasts. Zero takes session.DefaultTTL.
+	SessionTTL time.Duration
+
 	// PolicyCacheTTL is how long a principal's attached policies are reused. Zero takes the
 	// ttlcache default.
 	PolicyCacheTTL time.Duration
@@ -130,9 +134,14 @@ func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *stor
 	// The route table answers both middlewares' questions and also says where each request is
 	// served. Until M5 the first two were constants; the third arrived with M6, and keeping all
 	// three in one table is what stops a route being dispatched without being authorized.
+	// Console sessions authenticate against the same credentials the signature path uses, and
+	// through the same cache: sign-in is exactly as entitled to it as signature verification is.
+	sessions := session.NewManager(st, signingKeyAdapter{keys}, opts.SessionTTL, nil)
+
 	api := &controlapi.API{
 		Accounts: accounts,
 		Policies: policies,
+		Sessions: sessions,
 		Region:   opts.Region,
 		Dev:      opts.Dev,
 	}
@@ -178,11 +187,12 @@ func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *stor
 	// a signature would make the route table a public map of the API.
 	mux.Handle("/", httpx.Chain(dispatch,
 		authn.Middleware(authn.Config{
-			Keys:    keys,
-			Region:  opts.Region,
-			Service: table.ServiceFor(ServiceName),
-			Dev:     opts.Dev,
-			Log:     log,
+			Keys:     keys,
+			Sessions: sessions,
+			Region:   opts.Region,
+			Service:  table.ServiceFor(ServiceName),
+			Dev:      opts.Dev,
+			Log:      log,
 		}),
 		authz.Middleware(authz.Config{
 			Decide: authorizer,
@@ -192,6 +202,12 @@ func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *stor
 			Log:    log,
 		}),
 	))
+
+	// The one unauthenticated route, mounted at an exact path so it cannot be reached by
+	// anything else. It is a hole rather than an exemption: it is where a secret arrives in a
+	// body instead of signing one, and it needs a rate limit before this is exposed beyond
+	// localhost. See the comment in controlapi/session.go.
+	mux.Handle(controlapi.SignInPath, api.SignInHandler())
 
 	// Unauthenticated probes.
 	//
@@ -302,4 +318,20 @@ func Serve(ctx context.Context, addr string, handler http.Handler, log *slog.Log
 		}
 		return nil
 	}
+}
+
+// signingKeyAdapter lets the session manager use the front door's credential resolver without
+// the session package depending on the control plane's types.
+type signingKeyAdapter struct{ keys authn.KeyResolver }
+
+func (a signingKeyAdapter) ResolveSigningKey(ctx context.Context, accessKeyID string) (*session.SigningKey, error) {
+	key, err := a.keys.ResolveSigningKey(ctx, accessKeyID)
+	if err != nil {
+		return nil, err
+	}
+	return &session.SigningKey{
+		AccountID:    key.AccountID,
+		PrincipalARN: key.PrincipalARN,
+		Secret:       key.Secret,
+	}, nil
 }

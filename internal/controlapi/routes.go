@@ -40,7 +40,7 @@ func (a *API) Routes() []router.Route {
 			region, p.GetAccountId(), p.GetAccountId()), nil
 	}
 
-	return []router.Route{
+	routes := []router.Route{
 		{
 			Service: Service, Method: "GET", Prefix: prefix("/account"),
 			Action: "iam:GetAccount", Resource: selfAccount,
@@ -106,6 +106,8 @@ func (a *API) Routes() []router.Route {
 			Handler:  http.HandlerFunc(a.attachOrDetach),
 		},
 	}
+
+	return append(routes, a.sessionRoutes()...)
 }
 
 // ---------------------------------------------------------------------------

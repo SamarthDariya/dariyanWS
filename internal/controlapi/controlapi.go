@@ -32,6 +32,7 @@ import (
 	"dariyanws/internal/control"
 	"dariyanws/internal/httpx"
 	"dariyanws/internal/iam"
+	"dariyanws/internal/session"
 )
 
 // API holds what the handlers need. Constructed by the front door, which owns the lifetimes.
@@ -43,9 +44,13 @@ import (
 type API struct {
 	Accounts *control.AccountsServer
 	Policies *iam.Server
+	Sessions *session.Manager
 	Region   string
 	Dev      bool
 }
+
+// SignInPath is where the front door mounts the one unauthenticated route.
+const SignInPath = "/" + APIVersion + "/session/sign-in"
 
 // principal is the caller, and the only source of the account every handler scopes to.
 func principal(r *http.Request) (*commonv1.Principal, error) {

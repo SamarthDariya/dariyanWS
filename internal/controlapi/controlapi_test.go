@@ -117,6 +117,27 @@ func (rg *region_) admin(t *testing.T) (string, signing.Credentials) {
 	}
 }
 
+// bare mints an account with credentials and no policy at all.
+func (rg *region_) bare(t *testing.T) (string, signing.Credentials) {
+	t.Helper()
+	ctx := context.Background()
+
+	acct, err := rg.accounts.CreateAccount(ctx, &controlv1.CreateAccountRequest{Name: "bare"})
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	id := acct.GetAccount().GetAccountId()
+
+	key, err := rg.accounts.CreateAccessKey(ctx, &controlv1.CreateAccessKeyRequest{AccountId: id})
+	if err != nil {
+		t.Fatalf("CreateAccessKey: %v", err)
+	}
+	return id, signing.Credentials{
+		AccessKeyID: key.GetAccessKey().GetAccessKeyId(),
+		Secret:      []byte(key.GetAccessKey().GetSecretAccessKey()),
+	}
+}
+
 // call signs and sends a request, the way a console's generated client will.
 func (rg *region_) call(t *testing.T, cred signing.Credentials, method, path, body string) *http.Response {
 	t.Helper()
