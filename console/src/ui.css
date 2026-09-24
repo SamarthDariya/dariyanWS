@@ -1,0 +1,142 @@
+/* One stylesheet, tokens first. Light and dark both defined, because a console gets stared at
+   for hours and the system preference is the only setting nobody has to be taught. */
+
+:root {
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --surface-2: #f4f4f2;
+  --border: #e2e2dd;
+  --text: #1a1a17;
+  --text-dim: #6b6b63;
+  --accent: #1f6f5c;
+  --accent-text: #ffffff;
+  --danger: #a33a2a;
+  --warn-bg: #fdf6e3;
+  --warn-border: #e8d9a8;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14150f;
+    --surface: #1c1e17;
+    --surface-2: #23261d;
+    --border: #33362a;
+    --text: #eceade;
+    --text-dim: #97998a;
+    --accent: #6fbfa3;
+    --accent-text: #10120c;
+    --danger: #e0907b;
+    --warn-bg: #2a2718;
+    --warn-border: #4a422a;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+code, .mono { font-family: var(--mono); font-size: 0.92em; }
+
+/* Layout ------------------------------------------------------------------ */
+
+.shell { max-width: 1040px; margin: 0 auto; padding: 0 24px 64px; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 18px 0; margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.brand { font-weight: 650; letter-spacing: -0.01em; }
+.brand span { color: var(--text-dim); font-weight: 400; }
+.topbar .spacer { flex: 1; }
+.whoami { color: var(--text-dim); font-size: 13px; text-align: right; line-height: 1.3; }
+
+.tabs { display: flex; gap: 4px; margin: 18px 0 24px; }
+.tabs button {
+  background: none; border: none; cursor: pointer;
+  padding: 7px 14px; border-radius: var(--radius);
+  color: var(--text-dim); font: inherit; font-size: 14px;
+}
+.tabs button:hover { background: var(--surface-2); color: var(--text); }
+.tabs button[aria-current="page"] { background: var(--surface-2); color: var(--text); font-weight: 600; }
+
+/* Blocks ------------------------------------------------------------------ */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 18px;
+}
+.card h2 { margin: 0 0 4px; font-size: 16px; }
+.card .hint { margin: 0 0 16px; color: var(--text-dim); font-size: 13.5px; }
+
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+button.primary, button.ghost, button.danger {
+  font: inherit; font-size: 14px; cursor: pointer;
+  padding: 8px 14px; border-radius: 6px; border: 1px solid transparent;
+}
+button.primary { background: var(--accent); color: var(--accent-text); font-weight: 550; }
+button.ghost { background: var(--surface-2); color: var(--text); border-color: var(--border); }
+button.danger { background: none; color: var(--danger); border-color: var(--border); }
+button:disabled { opacity: 0.5; cursor: default; }
+
+input, textarea {
+  font: inherit; color: var(--text); background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; width: 100%;
+}
+textarea { font-family: var(--mono); font-size: 13px; min-height: 180px; resize: vertical; }
+label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 5px; }
+.field { margin-bottom: 14px; }
+
+/* Tables ------------------------------------------------------------------ */
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th {
+  text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-dim); font-weight: 600; padding: 0 12px 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+td { padding: 11px 12px 11px 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+td.actions { text-align: right; padding-right: 0; }
+
+.empty { color: var(--text-dim); font-size: 14px; padding: 18px 0; }
+
+/* Notices ----------------------------------------------------------------- */
+
+.error {
+  background: var(--surface-2); border: 1px solid var(--danger);
+  border-radius: var(--radius); padding: 12px 14px; margin-bottom: 16px; font-size: 14px;
+}
+.error .code { font-weight: 650; }
+.error .rid { display: block; margin-top: 6px; color: var(--text-dim); font-size: 12px; }
+
+/* The secret is shown once and never again, so it gets the loudest thing on the page. */
+.secret {
+  background: var(--warn-bg); border: 1px solid var(--warn-border);
+  border-radius: var(--radius); padding: 16px; margin-bottom: 18px;
+}
+.secret h3 { margin: 0 0 6px; font-size: 14px; }
+.secret p { margin: 0 0 12px; font-size: 13.5px; color: var(--text-dim); }
+.secret .value {
+  display: block; font-family: var(--mono); font-size: 13px; word-break: break-all;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 10px; margin-bottom: 10px;
+}
+
+/* Sign-in ----------------------------------------------------------------- */
+
+.signin { max-width: 400px; margin: 14vh auto; }
+.signin .card { padding: 26px; }
+.signin h1 { font-size: 19px; margin: 0 0 4px; }
+.signin .hint { margin-bottom: 20px; }

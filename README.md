@@ -6,16 +6,21 @@ Every other repo here is a system — `dariyaraah` is a request path, `dariyakyu
 `dariyanache` is a cache. This one is what makes them a cloud instead of five unrelated daemons.
 It owns no resources of its own; services own theirs.
 
-**Status: M3 complete.** The front door listens, authenticates a signed request, and authorizes it
-against IAM policy. Nothing is routed to another service yet — that is M5.
+**Status: M6 complete — there is a console.** The front door authenticates a signed request or a
+browser session, authorizes it against IAM policy, mints a capability, and proxies to a service
+that verifies it offline. A React console drives all of it.
 
-```
-$ sh <(go run ./cmd/dariyactl sign --service ws --url http://127.0.0.1:8080/ping)
-{"account_id":"223850835373","principal_arn":"arn:dariya:iam:hind-1:223850835373:user/root", ...}
+```sh
+make region-up                    # Postgres
+eval "$(make -s dev-keys)"        # master key + token keypair — keep these
+eval "$(make -s dev-token)"       # seed the dev account, mint an access key
 
-$ # the same request from an account with no policy
-{"code":"AccessDenied","message":"not authorized to perform ws:Ping on arn:dariya:ws:..."}
+make build && ./bin/frontdoor --dev &
+make console                      # once, to install
+make console-dev                  # http://127.0.0.1:5173
 ```
+
+Sign in with the access key id and secret that `dev-token` printed.
 
 ## What it does
 

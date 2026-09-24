@@ -13,3 +13,11 @@ plugins:
   - local: protoc-gen-go-grpc
     out: gen
     opt: paths=source_relative
+
+  # TypeScript for the console. Added at M6.3, when there was finally a consumer — generating an
+  # output nothing reads is how a contract rots unnoticed, which is why this was not here from
+  # the start. The plugin is the one installed into console/node_modules, so `make proto` needs
+  # `npm install` to have run there.
+  - local: ./console/node_modules/.bin/protoc-gen-es
+    out: console/src/gen
+    opt: target=ts

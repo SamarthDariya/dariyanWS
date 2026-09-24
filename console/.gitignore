@@ -1,0 +1,5 @@
+node_modules/
+dist/
+# Generated from ../proto — regenerate with `make proto`.
+src/gen/
+*.tsbuildinfo

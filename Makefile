@@ -55,6 +55,18 @@ cpp-test: cpp
 vectors:
 	UPDATE_VECTORS=1 go test ./internal/signing -run TestSigningVectors -count=1
 
+## console: install the console's dependencies (needed before `make proto` regenerates its client)
+console:
+	cd console && npm install
+
+## console-dev: run the console against a front door on :8080
+console-dev:
+	cd console && npm run dev
+
+## console-build: type-check and build the console
+console-build:
+	cd console && npm run build
+
 ## region-up: boot the region (Postgres now; front door from M2)
 region-up:
 	docker compose -f deploy/docker-compose.yml up -d
@@ -82,4 +94,4 @@ dev-token:
 		exit 1; }
 	@go run ./cmd/dariyactl bootstrap
 
-.PHONY: help tools proto lint breaking build test test-integration cpp cpp-test vectors region-up region-down region-nuke dev-keys dev-token
+.PHONY: help tools proto lint breaking build test test-integration cpp cpp-test vectors console console-dev console-build region-up region-down region-nuke dev-keys dev-token
