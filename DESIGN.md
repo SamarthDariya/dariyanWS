@@ -93,9 +93,31 @@ is that the contract becomes a real versioned artifact that breaks the build whe
 than a convention in a README that drifts.
 
 - **Edge wire:** JSON over HTTP/1.1, signed. curl-able, AWS-shaped, demonstrable.
-- **Internal wire:** gRPC, front door → service. Typed, streaming available for logs and invokes.
+- **Internal wire:** JSON over HTTP/1.1, front door → service, with the capability as a header.
 
-The proto is the source of truth for both; the edge JSON is a projection of it.
+The proto is the source of truth for both; the JSON on either wire is a projection of it.
+
+**Amendment (M5), reversing the internal wire from gRPC.** This decision originally specified gRPC
+between the front door and each service, for typed stubs and for streaming.
+
+What forced the change was M2.4a. The C++ client was built deliberately dependency-free — SHA-256
+and HMAC bundled rather than linked — on the grounds that a service repo vendoring it should
+inherit nothing, not OpenSSL and not a `find_package` dance. gRPC's C++ stack is a far heavier
+dependency than the one that reasoning refused: protobuf runtime, gRPC core, and their build
+systems, imposed on `dariyakyu` and every other C++ data plane. Meanwhile `dariyaraah` and
+`dariyanaap` already speak HTTP/1.1 natively, and the capability travels as a header, which works
+identically on both wires.
+
+Costs, accepted rather than argued away:
+
+- **No typed stubs internally.** The proto stops being enforced at the internal boundary, so a
+  service and the front door can drift on a field name and only find out at runtime. The contract
+  is still generated and still the source of truth; it is just no longer the compiler's problem
+  on that hop.
+- **No streaming.** Log tailing and streaming invokes would have come free with gRPC. They now
+  need chunked responses or a second mechanism, and that bill arrives at dariyafunc.
+- **Reversible.** Nothing about the capability header or the ARN scheme assumes HTTP, so a service
+  that genuinely needs streaming can be given a gRPC endpoint without the others following.
 
 ### 4. Names: `arn:dariya:<service>:<region>:<account>:<type>/<id>`
 
