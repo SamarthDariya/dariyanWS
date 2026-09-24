@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	commonv1 "dariyanws/gen/dariya/common/v1"
 	"dariyanws/internal/httpx"
 	"dariyanws/internal/router"
 )
@@ -255,28 +254,5 @@ func TestUnroutableRequest(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
-	}
-}
-
-// A route the front door was meant to serve itself must not silently 404 if its handler was
-// never mounted — the caller did nothing wrong and nothing they change will help.
-func TestRouteWithNoUpstreamIsAnInternalError(t *testing.T) {
-	table, err := router.NewTable(region, []router.Route{{
-		Service: "ws", Prefix: "/ping", Action: "ws:Ping",
-		Resource: func(*http.Request, *commonv1.Principal) (string, error) {
-			return "arn:dariya:ws:hind-1:000000000001:endpoint/ping", nil
-		},
-	}})
-	if err != nil {
-		t.Fatalf("NewTable: %v", err)
-	}
-
-	h := httpx.Chain(New(Options{Table: table, Log: discard()}), httpx.WithRequestID)
-
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/ping", nil))
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }

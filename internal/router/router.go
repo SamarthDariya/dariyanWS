@@ -35,8 +35,13 @@ type Route struct {
 	// Method is the HTTP method. Empty matches any, which is used only by probes.
 	Method string
 
-	// Prefix is matched against the path. Longest prefix wins, so "/2026-09-18/functions/" can
-	// sit alongside a broader "/2026-09-18/" without ordering mattering.
+	// Prefix is matched against the path at a SEGMENT BOUNDARY. Longest prefix wins, so
+	// "/2026-09-18/functions/" can sit alongside a broader "/2026-09-18/" without ordering
+	// mattering.
+	//
+	// The boundary rule is not a refinement, it is the difference between a correct table and a
+	// dangerous one: a plain strings.HasPrefix makes "/account" match "/accounts", and every
+	// route becomes a prefix of every longer path that happens to start with the same letters.
 	Prefix string
 
 	// Action is the permission, service-qualified: "func:Invoke".
@@ -48,9 +53,16 @@ type Route struct {
 	// into it.
 	Resource func(r *http.Request, p *commonv1.Principal) (string, error)
 
-	// Upstream is where the request is proxied. Empty means the front door serves it itself,
-	// which is how the control-plane routes work until IAM moves out at v2.
+	// Upstream is where the request is proxied, for a route a service owns.
 	Upstream string
+
+	// Handler serves the route in this process, for a route the control plane owns.
+	//
+	// Exactly one of Handler and Upstream must be set. Keeping both on the same struct means
+	// there is one table rather than a table for authorization and a mux for dispatch — two
+	// lists that would drift, and whose drift would show up as a route that is dispatched but
+	// never authorized.
+	Handler http.Handler
 }
 
 // Table is an immutable set of routes, consulted once per request.
@@ -73,6 +85,12 @@ func NewTable(region string, routes []Route) (*Table, error) {
 			return nil, fmt.Errorf("router: route %d (%s) has no action", i, rt.Prefix)
 		case rt.Resource == nil:
 			return nil, fmt.Errorf("router: route %d (%s) has no resource", i, rt.Prefix)
+		case rt.Handler == nil && rt.Upstream == "":
+			return nil, fmt.Errorf("router: route %d (%s) has neither a handler nor an upstream",
+				i, rt.Prefix)
+		case rt.Handler != nil && rt.Upstream != "":
+			return nil, fmt.Errorf("router: route %d (%s) has both a handler and an upstream",
+				i, rt.Prefix)
 		}
 	}
 	return &Table{routes: routes, region: region}, nil
@@ -85,7 +103,7 @@ func (t *Table) Match(r *http.Request) (Route, bool) {
 		if rt.Method != "" && rt.Method != r.Method {
 			continue
 		}
-		if !strings.HasPrefix(r.URL.Path, rt.Prefix) {
+		if !matchesPrefix(r.URL.Path, rt.Prefix) {
 			continue
 		}
 		if best < 0 || len(rt.Prefix) > len(t.routes[best].Prefix) {
@@ -96,6 +114,26 @@ func (t *Table) Match(r *http.Request) (Route, bool) {
 		return Route{}, false
 	}
 	return t.routes[best], true
+}
+
+// matchesPrefix reports whether path lies under prefix, at a segment boundary.
+//
+// Found by a test that expected GET /2026-09-01/accounts to be unroutable and got 200 from the
+// /2026-09-01/account route instead. A bare strings.HasPrefix means any route is reachable by any
+// longer path sharing its spelling, which is both a wrong answer and — since the route decides
+// the action and the resource — a request authorized as something it is not.
+func matchesPrefix(path, prefix string) bool {
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	if len(path) == len(prefix) {
+		return true
+	}
+	// A prefix that already ends in "/" names the boundary itself.
+	if strings.HasSuffix(prefix, "/") {
+		return true
+	}
+	return path[len(prefix)] == '/'
 }
 
 // ServiceFor answers authn's question: which service must the signature be scoped to?

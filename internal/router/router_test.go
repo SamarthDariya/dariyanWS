@@ -1,6 +1,7 @@
 package router
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -28,6 +29,7 @@ func testTable(t *testing.T) *Table {
 		{
 			Service: "ws", Prefix: "/ping", Action: "ws:Ping",
 			Resource: AccountResource(region, "ws", "endpoint", "ping"),
+			Handler:  http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 		},
 		{
 			Service: "func", Prefix: "/2026-09-18/functions/", Action: "func:Invoke",
@@ -50,7 +52,7 @@ func testTable(t *testing.T) *Table {
 // way to ship an authenticated-but-unauthorized corner.
 func TestRouteWithoutAnActionIsRejected(t *testing.T) {
 	_, err := NewTable(region, []Route{{
-		Service: "func", Prefix: "/x",
+		Service: "func", Prefix: "/x", Upstream: "http://127.0.0.1:1",
 		Resource: AccountResource(region, "func", "function", "x"),
 	}})
 	if err == nil {
@@ -62,7 +64,9 @@ func TestRouteWithoutAnActionIsRejected(t *testing.T) {
 }
 
 func TestRouteWithoutAResourceIsRejected(t *testing.T) {
-	_, err := NewTable(region, []Route{{Service: "func", Prefix: "/x", Action: "func:Invoke"}})
+	_, err := NewTable(region, []Route{{
+		Service: "func", Prefix: "/x", Action: "func:Invoke", Upstream: "http://127.0.0.1:1",
+	}})
 	if err == nil {
 		t.Fatal("a route with no resource was accepted")
 	}
@@ -170,11 +174,13 @@ func TestLongestPrefixWins(t *testing.T) {
 	table, err := NewTable(region, []Route{
 		{
 			Service: "func", Prefix: "/2026-09-18/", Action: "func:List",
-			Resource: AccountResource(region, "func", "function", "*all*"),
+			Resource: AccountResource(region, "func", "function", "all"),
+			Upstream: "http://127.0.0.1:1",
 		},
 		{
 			Service: "func", Prefix: "/2026-09-18/functions/", Action: "func:Invoke",
 			Resource: PathResource(region, "func", "function", "/2026-09-18/functions/"),
+			Upstream: "http://127.0.0.1:1",
 		},
 	})
 	if err != nil {
@@ -197,10 +203,12 @@ func TestMethodNarrowsARoute(t *testing.T) {
 		{
 			Service: "func", Method: "GET", Prefix: "/f/", Action: "func:GetFunction",
 			Resource: PathResource(region, "func", "function", "/f/"),
+			Upstream: "http://127.0.0.1:1",
 		},
 		{
 			Service: "func", Method: "DELETE", Prefix: "/f/", Action: "func:DeleteFunction",
 			Resource: PathResource(region, "func", "function", "/f/"),
+			Upstream: "http://127.0.0.1:1",
 		},
 	})
 	if err != nil {
@@ -212,5 +220,58 @@ func TestMethodNarrowsARoute(t *testing.T) {
 	}
 	if rt, _ := table.Match(httptest.NewRequest("DELETE", "/f/a", nil)); rt.Action != "func:DeleteFunction" {
 		t.Errorf("DELETE matched %q", rt.Action)
+	}
+}
+
+// Exactly one of Handler and Upstream. Neither means a route that authorizes and then has
+// nowhere to go; both means two answers to where a request is served, and whichever the
+// dispatcher happens to check first becomes the real one.
+func TestRouteNeedsExactlyOneDestination(t *testing.T) {
+	base := Route{
+		Service: "ws", Prefix: "/x", Action: "ws:X",
+		Resource: AccountResource(region, "ws", "endpoint", "x"),
+	}
+
+	if _, err := NewTable(region, []Route{base}); err == nil {
+		t.Error("a route with no destination was accepted")
+	}
+
+	both := base
+	both.Handler = http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	both.Upstream = "http://127.0.0.1:1"
+	if _, err := NewTable(region, []Route{both}); err == nil {
+		t.Error("a route with both a handler and an upstream was accepted")
+	}
+}
+
+// A prefix matches only at a segment boundary. Without this, "/account" matches "/accounts" and
+// every route is reachable by any longer path that happens to share its spelling — which is not
+// just a wrong destination but a request authorized as something it is not, since the route
+// decides the action and the resource.
+func TestPrefixMatchesOnlyAtASegmentBoundary(t *testing.T) {
+	table, err := NewTable(region, []Route{{
+		Service: "iam", Method: "GET", Prefix: "/2026-09-01/account",
+		Action: "iam:GetAccount", Resource: AccountResource(region, "iam", "account", "self"),
+		Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+	}})
+	if err != nil {
+		t.Fatalf("NewTable: %v", err)
+	}
+
+	if _, ok := table.Match(httptest.NewRequest("GET", "/2026-09-01/account", nil)); !ok {
+		t.Error("the exact path did not match")
+	}
+	if _, ok := table.Match(httptest.NewRequest("GET", "/2026-09-01/account/keys", nil)); !ok {
+		t.Error("a path under the prefix did not match")
+	}
+
+	for _, path := range []string{
+		"/2026-09-01/accounts",
+		"/2026-09-01/accountsomething",
+		"/2026-09-01/accounts/000000000002",
+	} {
+		if _, ok := table.Match(httptest.NewRequest("GET", path, nil)); ok {
+			t.Errorf("%s matched the /account route", path)
+		}
 	}
 }

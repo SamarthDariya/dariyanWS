@@ -108,9 +108,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if route.Upstream == "" {
-		// A route the front door was supposed to serve itself reached the proxy, which means the
-		// handler for it was never mounted. A 500 rather than a 404: the caller did nothing
-		// wrong and nothing they can change will help.
+		// Unreachable by construction since M6: router.NewTable refuses a route with neither a
+		// handler nor an upstream, and Table cannot be built any other way. Kept because the
+		// invariant lives in another package, and a 500 here is a far better failure than a
+		// request silently proxied to "" if a third kind of destination is ever added.
 		httpx.WriteError(w, r, apierr.Internal(nil, "internal failure"), p.dev)
 		p.log.Error("route has no upstream and no handler",
 			"request_id", httpx.RequestID(r.Context()), "path", r.URL.Path)
