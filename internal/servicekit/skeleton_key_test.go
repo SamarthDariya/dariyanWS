@@ -69,17 +69,18 @@ func tokenFor(t *testing.T, m *capability.Minter, action, resourceARN, account s
 }
 
 // service is now the shortest correct implementation, which is also the only one the API allows.
-func service(g *Guard, servesResourceARN string) http.Handler {
+func service(g *Guard, servesFunction string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := g.Authorize(r, Intent{
-			Action:      "func:Invoke",
-			ResourceARN: servesResourceARN,
+			Action:       "func:Invoke",
+			ResourceType: "function",
+			ResourceID:   servesFunction,
 		}); err != nil {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("invoked " + servesResourceARN))
+		_, _ = w.Write([]byte("invoked " + servesFunction))
 	})
 }
 
@@ -102,7 +103,7 @@ func request(t *testing.T, url, header string) *http.Response {
 // E4, inverted. This is the test that was passing at M4.3 with the opposite assertion.
 func TestSkeletonKeyIsClosed(t *testing.T) {
 	m, v := testKeys(t)
-	srv := httptest.NewServer(service(NewGuard(v, "func"), functionB))
+	srv := httptest.NewServer(service(NewGuard(v, "func", "hind-1"), "b"))
 	defer srv.Close()
 
 	resp := request(t, srv.URL, tokenFor(t, m, "func:Invoke", functionA, accountID))
@@ -115,7 +116,7 @@ func TestSkeletonKeyIsClosed(t *testing.T) {
 
 func TestTheRightCapabilityStillWorks(t *testing.T) {
 	m, v := testKeys(t)
-	srv := httptest.NewServer(service(NewGuard(v, "func"), functionB))
+	srv := httptest.NewServer(service(NewGuard(v, "func", "hind-1"), "b"))
 	defer srv.Close()
 
 	resp := request(t, srv.URL, tokenFor(t, m, "func:Invoke", functionB, accountID))
@@ -129,7 +130,7 @@ func TestTheRightCapabilityStillWorks(t *testing.T) {
 // Each check, exercised directly, so a failure names the rule that fired rather than just "403".
 func TestAuthorizeChecks(t *testing.T) {
 	m, v := testKeys(t)
-	g := NewGuard(v, "func")
+	g := NewGuard(v, "func", "hind-1")
 
 	cases := map[string]struct {
 		header string
@@ -138,27 +139,32 @@ func TestAuthorizeChecks(t *testing.T) {
 	}{
 		"wrong resource": {
 			tokenFor(t, m, "func:Invoke", functionA, accountID),
-			Intent{Action: "func:Invoke", ResourceARN: functionB},
+			Intent{Action: "func:Invoke", ResourceType: "function", ResourceID: "b"},
 			ErrMismatch,
 		},
 		"wrong action": {
 			tokenFor(t, m, "func:DeleteFunction", functionB, accountID),
-			Intent{Action: "func:Invoke", ResourceARN: functionB},
+			Intent{Action: "func:Invoke", ResourceType: "function", ResourceID: "b"},
 			ErrMismatch,
 		},
+		// A kyu token presented to the func service: the guard assembles the expected ARN with
+		// its OWN service segment, so it cannot be talked into honouring another service's
+		// capability however the intent is written.
 		"another service's resource": {
 			tokenFor(t, m, "kyu:SendMessage", queueOne, accountID),
-			Intent{Action: "kyu:SendMessage", ResourceARN: queueOne},
+			Intent{Action: "kyu:SendMessage", ResourceType: "queue", ResourceID: "orders"},
 			ErrMismatch,
 		},
-		"account disagrees with resource": {
+		// The account comes from the token, so a token for another account simply builds a
+		// different expected ARN and fails to match.
+		"another account's token": {
 			tokenFor(t, m, "func:Invoke", functionB, otherAcct),
-			Intent{Action: "func:Invoke", ResourceARN: functionB},
+			Intent{Action: "func:Invoke", ResourceType: "function", ResourceID: "b"},
 			ErrMismatch,
 		},
 		"no capability": {
 			"",
-			Intent{Action: "func:Invoke", ResourceARN: functionB},
+			Intent{Action: "func:Invoke", ResourceType: "function", ResourceID: "b"},
 			ErrNoCapability,
 		},
 	}
@@ -180,15 +186,16 @@ func TestAuthorizeChecks(t *testing.T) {
 // An intent that does not say what it is for must be refused rather than matched loosely.
 func TestIncompleteIntentIsRefused(t *testing.T) {
 	m, v := testKeys(t)
-	g := NewGuard(v, "func")
+	g := NewGuard(v, "func", "hind-1")
 
 	r := httptest.NewRequest("POST", "/invoke", nil)
 	r.Header.Set(httpx.CapabilityHeader, tokenFor(t, m, "func:Invoke", functionB, accountID))
 
 	for name, intent := range map[string]Intent{
-		"no action":   {ResourceARN: functionB},
-		"no resource": {Action: "func:Invoke"},
-		"empty":       {},
+		"no action":        {ResourceType: "function", ResourceID: "b"},
+		"no resource type": {Action: "func:Invoke", ResourceID: "b"},
+		"no resource id":   {Action: "func:Invoke", ResourceType: "function"},
+		"empty":            {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := g.Authorize(r, intent); err == nil {
@@ -201,7 +208,7 @@ func TestIncompleteIntentIsRefused(t *testing.T) {
 // The controls from M4.3, kept: the fix must not have been achieved by breaking verification.
 func TestStillRejectsTheObviousThings(t *testing.T) {
 	m, v := testKeys(t)
-	srv := httptest.NewServer(service(NewGuard(v, "func"), functionB))
+	srv := httptest.NewServer(service(NewGuard(v, "func", "hind-1"), "b"))
 	defer srv.Close()
 
 	t.Run("no capability", func(t *testing.T) {

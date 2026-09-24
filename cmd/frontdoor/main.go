@@ -18,6 +18,7 @@ import (
 	"dariyanws/internal/control"
 	"dariyanws/internal/frontdoor"
 	"dariyanws/internal/iam"
+	"dariyanws/internal/router"
 	"dariyanws/internal/secrets"
 	"dariyanws/internal/store"
 )
@@ -31,6 +32,13 @@ func main() {
 			"development mode: error responses name the check that rejected a request")
 		nocache = flag.Bool("no-key-cache", false,
 			"resolve every access key from Postgres — E2's control, see BREAK.md")
+
+		// One service, one flag, for as long as there is one service. A registry that services
+		// self-register into is the obvious next step and is deliberately not taken yet: it
+		// would be a discovery mechanism with a single participant, and its failure modes could
+		// not be exercised.
+		funcUpstream = flag.String("func-upstream", envOr("DARIYA_FUNC_UPSTREAM", ""),
+			"base URL of the func data plane, e.g. http://127.0.0.1:8081")
 	)
 	flag.Parse()
 
@@ -41,14 +49,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, *region, *dsn, *dev, *nocache, log); err != nil {
+	if err := run(ctx, *addr, *region, *dsn, *dev, *nocache, *funcUpstream, log); err != nil {
 		log.Error("front door stopped", "error", err)
 		os.Exit(1)
 	}
 	log.Info("front door stopped")
 }
 
-func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, log *slog.Logger) error {
+func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, funcUpstream string, log *slog.Logger) error {
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
 		return err
@@ -77,13 +85,30 @@ func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, log *
 	accounts := control.NewAccountsServer(st, kr, region, time.Now)
 	policies := iam.NewServer(st, region, time.Now)
 
-	handler, _ := frontdoor.NewHandler(accounts, policies, st, frontdoor.Options{
+	// The routes this front door proxies. Empty is legal and means a control plane with no data
+	// planes behind it, which is what every milestone before this one was.
+	var routes []router.Route
+	if funcUpstream != "" {
+		routes = append(routes, router.Route{
+			Service:  "func",
+			Prefix:   "/f/",
+			Action:   "func:Invoke",
+			Resource: router.PathResource(region, "func", "function", "/f/"),
+			Upstream: funcUpstream,
+		})
+	}
+
+	handler, _, err := frontdoor.NewHandler(accounts, policies, st, frontdoor.Options{
 		Region:          region,
 		Dev:             dev,
 		Log:             log,
 		Mint:            minter,
 		DisableKeyCache: nocache,
+		Routes:          routes,
 	})
+	if err != nil {
+		return err
+	}
 
 	if dev {
 		log.Warn("development mode: error responses will name the check that rejected a request")

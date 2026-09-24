@@ -23,7 +23,9 @@ import (
 	"dariyanws/internal/control"
 	"dariyanws/internal/httpx"
 	"dariyanws/internal/iam"
+	"dariyanws/internal/router"
 	"dariyanws/internal/secrets"
+	"dariyanws/internal/servicekit"
 	"dariyanws/internal/signing"
 	"dariyanws/internal/store"
 
@@ -56,12 +58,15 @@ func newRegion(t *testing.T) (*httptest.Server, *control.AccountsServer, *iam.Se
 	policies := iam.NewServer(st, testRegion, time.Now)
 
 	minter, _ := testTokenKeys(t)
-	handler, _ := NewHandler(accounts, policies, st, Options{
+	handler, _, err := NewHandler(accounts, policies, st, Options{
 		Region: testRegion,
 		Dev:    false,
 		Mint:   minter,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
 
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
@@ -268,12 +273,15 @@ func TestTamperedQueryIsRejected(t *testing.T) {
 
 func TestServeDrainsOnCancel(t *testing.T) {
 	st := store.OpenTest(t)
-	handler, _ := NewHandler(
+	handler, _, err := NewHandler(
 		control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now),
 		iam.NewServer(st, testRegion, time.Now),
 		st,
 		Options{Region: testRegion, Log: slog.New(slog.NewTextHandler(io.Discard, nil))},
 	)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -350,10 +358,13 @@ func TestKeyCacheIsInThePath(t *testing.T) {
 	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
 	policies := iam.NewServer(st, testRegion, time.Now)
 
-	handler, cache := NewHandler(accounts, policies, st, Options{
+	handler, cache, err := NewHandler(accounts, policies, st, Options{
 		Region: testRegion,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
 	if cache == nil {
 		t.Fatal("no cache was built")
 	}
@@ -390,11 +401,14 @@ func TestKeyCacheCanBeDisabled(t *testing.T) {
 	st := store.OpenTest(t)
 	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
 
-	_, cache := NewHandler(accounts, iam.NewServer(st, testRegion, time.Now), st, Options{
+	_, cache, err := NewHandler(accounts, iam.NewServer(st, testRegion, time.Now), st, Options{
 		Region:          testRegion,
 		DisableKeyCache: true,
 		Log:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
 	if cache != nil {
 		t.Error("DisableKeyCache still built a cache")
 	}
@@ -523,11 +537,14 @@ func TestCapabilityIsMintedAndStaysServerSide(t *testing.T) {
 	policies := iam.NewServer(st, testRegion, time.Now)
 	minter, _ := testTokenKeys(t)
 
-	handler, _ := NewHandler(accounts, policies, st, Options{
+	handler, _, err := NewHandler(accounts, policies, st, Options{
 		Region: testRegion,
 		Mint:   minter,
 		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
 
 	// Wrap the whole chain so the capability can be observed exactly where a proxied service
 	// would find it: on the inbound request, after authz.
@@ -665,4 +682,162 @@ func TestCapabilityHeaderVerifiesOffline(t *testing.T) {
 	if cap.GetAccountId() != acctID {
 		t.Errorf("account = %q", cap.GetAccountId())
 	}
+}
+
+// M5.3's proof: a signed request crosses the front door, is authorized against policy, carries a
+// capability over a real proxy hop, and is honoured by a service that verifies it offline.
+//
+// That is every piece of the system in one request, and it is the precondition for E1 — the data
+// plane cannot outlive the control plane until it is a separate process that decides for itself.
+func TestEndToEndThroughTheProxy(t *testing.T) {
+	st := store.OpenTest(t)
+	store.TruncateAll(t, st)
+
+	accounts := control.NewAccountsServer(st, testKeyring(t), testRegion, time.Now)
+	policies := iam.NewServer(st, testRegion, time.Now)
+	minter, verifier := testTokenKeys(t)
+
+	// A data plane, written the only way servicekit allows.
+	guard := servicekit.NewGuard(verifier, "func", testRegion)
+	dataPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/f/"), "/invocations")
+
+		cap, err := guard.Authorize(r, servicekit.Intent{
+			Action:       "func:Invoke",
+			ResourceType: "function",
+			ResourceID:   name,
+		})
+		if err != nil {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(err.Error()))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"served":     name,
+			"account_id": cap.GetAccountId(),
+			"action":     cap.GetAction(),
+		})
+	}))
+	defer dataPlane.Close()
+
+	handler, _, err := NewHandler(accounts, policies, st, Options{
+		Region: testRegion,
+		Mint:   minter,
+		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Routes: []router.Route{{
+			Service:  "func",
+			Prefix:   "/f/",
+			Action:   "func:Invoke",
+			Resource: router.PathResource(testRegion, "func", "function", "/f/"),
+			Upstream: dataPlane.URL,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	front := httptest.NewServer(handler)
+	defer front.Close()
+
+	acctID, cred := credentials(t, accounts)
+
+	// A policy granting func:Invoke on one function only.
+	created, err := policies.CreatePolicy(context.Background(), &iamv1.CreatePolicyRequest{
+		AccountId: acctID, Name: "invoke-resize",
+		Document: &iamv1.PolicyDocument{Statements: []*iamv1.Statement{{
+			Sid: "invoke", Effect: iamv1.Effect_EFFECT_ALLOW,
+			Actions:   []string{"func:Invoke"},
+			Resources: []string{"arn:dariya:func:" + testRegion + ":" + acctID + ":function/resize"},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("CreatePolicy: %v", err)
+	}
+	if _, err := policies.AttachPolicy(context.Background(), &iamv1.AttachPolicyRequest{
+		PolicyArn:    created.GetPolicy().GetPolicyArn(),
+		PrincipalArn: "arn:dariya:iam:" + testRegion + ":" + acctID + ":user/root",
+	}); err != nil {
+		t.Fatalf("AttachPolicy: %v", err)
+	}
+
+	// Signed for the func service, because the route says so — not for ws.
+	invoke := func(t *testing.T, function string) *http.Response {
+		t.Helper()
+		path := "/f/" + function + "/invocations"
+
+		req, err := http.NewRequest("POST", front.URL+path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		auth, headers := signing.Sign(
+			signing.Request{Method: "POST", Path: path},
+			cred, testRegion, "func", time.Now())
+		req.Header.Set("Authorization", auth)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		return resp
+	}
+
+	t.Run("the granted function", func(t *testing.T) {
+		resp := invoke(t, "resize")
+		defer resp.Body.Close()
+
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+		}
+
+		var got map[string]string
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("not JSON: %s", body)
+		}
+		if got["served"] != "resize" || got["account_id"] != acctID {
+			t.Errorf("the data plane served %v", got)
+		}
+	})
+
+	// Refused at the front door by policy, so the data plane never sees it — which is the
+	// division of labour decision 6 describes: IAM decides, the service enforces.
+	t.Run("a function the policy does not grant", func(t *testing.T) {
+		resp := invoke(t, "delete-everything")
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusForbidden {
+			body, _ := io.ReadAll(resp.Body)
+			t.Errorf("status = %d, want 403; body = %s", resp.StatusCode, body)
+		}
+	})
+
+	// The route decides the signature's scope. A ws-scoped signature on a func route is refused
+	// by authn, before policy is consulted at all.
+	t.Run("signature scoped to the wrong service", func(t *testing.T) {
+		path := "/f/resize/invocations"
+		req, _ := http.NewRequest("POST", front.URL+path, nil)
+		auth, headers := signing.Sign(
+			signing.Request{Method: "POST", Path: path},
+			cred, testRegion, ServiceName, time.Now()) // "ws", not "func"
+		req.Header.Set("Authorization", auth)
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("status = %d, want 401", resp.StatusCode)
+		}
+	})
 }

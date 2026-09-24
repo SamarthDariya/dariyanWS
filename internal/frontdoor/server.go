@@ -27,6 +27,8 @@ import (
 	"dariyanws/internal/control"
 	"dariyanws/internal/httpx"
 	"dariyanws/internal/iam"
+	"dariyanws/internal/proxy"
+	"dariyanws/internal/router"
 	"dariyanws/internal/store"
 )
 
@@ -62,6 +64,14 @@ type Options struct {
 	// "how long after a revocation can this still work?".
 	KeyCacheTTL time.Duration
 
+	// Routes are the services this front door fronts. The control plane's own routes are added
+	// by NewHandler; these are the ones that get proxied.
+	Routes []router.Route
+
+	// ProxyTimeout bounds one upstream request. It must stay under the server's write timeout,
+	// or the front door abandons the client before it abandons the service.
+	ProxyTimeout time.Duration
+
 	// Mint turns each allow into a capability the service downstream can verify offline
 	// (DESIGN.md decision 6). Nil leaves the decision in this process, which is what M3 did.
 	Mint authz.Minter
@@ -89,7 +99,7 @@ type Options struct {
 //
 // Separated from listening so tests can exercise the whole chain — request ids, authentication,
 // error rendering — over an in-process transport without binding a port.
-func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *store.Store, opts Options) (http.Handler, *control.CachingResolver) {
+func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *store.Store, opts Options) (http.Handler, *control.CachingResolver, error) {
 	log := opts.Log
 	if log == nil {
 		log = slog.Default()
@@ -116,34 +126,60 @@ func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *stor
 	})
 	policies.OnPrincipalChanged(authorizer.InvalidatePrincipal)
 
+	// The route table answers both middlewares' questions. Until M5 they were constants; the
+	// function types they were written against are what let this be swapped in without either
+	// middleware changing.
+	routes := append([]router.Route{{
+		Service: ServiceName,
+		Prefix:  "/ping",
+		Action:  ActionPing,
+		Resource: func(_ *http.Request, p *commonv1.Principal) (string, error) {
+			return PingResourceARN(opts.Region, p.GetAccountId()), nil
+		},
+	}}, opts.Routes...)
+
+	table, err := router.NewTable(opts.Region, routes)
+	if err != nil {
+		// A malformed table is a programming error found at boot, which is the only acceptable
+		// time to find it: the alternative is a route that authenticates and then serves.
+		return nil, nil, err
+	}
+
 	mux := http.NewServeMux()
 
-	// Authenticated and authorized. Everything the cloud actually does lives behind this chain,
-	// authn outermost: there is no point asking what a caller may do before knowing who they are,
-	// and authz fails closed if it ever finds itself without one.
-	authenticated := httpx.Chain(
-		http.HandlerFunc(handlePing),
-		authn.Middleware(authn.Config{
-			Keys:    keys,
-			Region:  opts.Region,
-			Service: func(*http.Request) string { return ServiceName },
-			Dev:     opts.Dev,
-			Log:     log,
-		}),
-		authz.Middleware(authz.Config{
-			Decide: authorizer,
-			Mint:   opts.Mint,
-			Target: func(_ *http.Request, p *commonv1.Principal) (authz.Target, error) {
-				return authz.Target{
-					Action:      ActionPing,
-					ResourceARN: PingResourceARN(opts.Region, p.GetAccountId()),
-				}, nil
-			},
-			Dev: opts.Dev,
-			Log: log,
-		}),
-	)
-	mux.Handle("/ping", authenticated)
+	// One chain, mounted twice. Everything authenticated goes through the same authn and authz,
+	// and the only difference between a control-plane route and a proxied one is what sits at
+	// the end of it.
+	chain := func(h http.Handler) http.Handler {
+		return httpx.Chain(h,
+			authn.Middleware(authn.Config{
+				Keys:    keys,
+				Region:  opts.Region,
+				Service: table.ServiceFor(ServiceName),
+				Dev:     opts.Dev,
+				Log:     log,
+			}),
+			authz.Middleware(authz.Config{
+				Decide: authorizer,
+				Mint:   opts.Mint,
+				Target: table.TargetFor(),
+				Dev:    opts.Dev,
+				Log:    log,
+			}),
+		)
+	}
+
+	mux.Handle("/ping", chain(http.HandlerFunc(handlePing)))
+
+	// Everything else routed goes to the proxy. Mounted at "/" so an unknown path still passes
+	// through authn first — a 404 reachable without a signature would make the route table a
+	// public map of the API.
+	mux.Handle("/", chain(proxy.New(proxy.Options{
+		Table:   table,
+		Timeout: opts.ProxyTimeout,
+		Dev:     opts.Dev,
+		Log:     log,
+	})))
 
 	// Unauthenticated probes.
 	//
@@ -160,7 +196,7 @@ func NewHandler(accounts *control.AccountsServer, policies *iam.Server, st *stor
 		httpx.WithRequestID,
 		httpx.Recover(opts.Dev),
 		httpx.AccessLog(log),
-	), cache
+	), cache, nil
 }
 
 // handlePing echoes the caller back to themselves.
