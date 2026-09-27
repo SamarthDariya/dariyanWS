@@ -11,16 +11,26 @@ browser session, authorizes it against IAM policy, mints a capability, and proxi
 that verifies it offline. A React console drives all of it.
 
 ```sh
-make region-up                    # Postgres
-eval "$(make -s dev-keys)"        # master key + token keypair — keep these
-eval "$(make -s dev-token)"       # seed the dev account, mint an access key
-
-make build && ./bin/frontdoor --dev &
-make console                      # once, to install
-make console-dev                  # http://127.0.0.1:5173
+make region-up
+eval "$(make -s dev-keys)"
+eval "$(make -s dev-token)"
+make build
+./bin/frontdoor --dev &
+make console-dev
 ```
 
-Sign in with the access key id and secret that `dev-token` printed.
+`make console` installs the console's dependencies, and is needed once before the first
+`make console-dev` and again whenever `make proto` has to regenerate the TypeScript client.
+
+Then print the credentials to sign in with. `eval` consumes the output, so the values are in the
+shell and not on the screen:
+
+```sh
+echo "$DARIYA_ACCESS_KEY_ID"
+echo "$DARIYA_SECRET_ACCESS_KEY"
+```
+
+Open the URL Vite prints and sign in with those two values.
 
 ## What it does
 
@@ -32,24 +42,32 @@ Sign in with the access key id and secret that `dev-token` printed.
   default is deny, and a principal can never touch another account's resources however broad its
   policy is.
 
-## Quick start
+## Working on it
+
+Every line below is safe to paste as a block. Trailing `#` comments are deliberately absent:
+zsh does not treat `#` as a comment when pasted interactively, so `make console  # once` becomes
+`make console '#' once` and fails with "No rule to make target '#'".
 
 ```sh
-make tools                        # buf + protoc plugins, into $(go env GOPATH)/bin
-make proto                        # regenerate gen/
-make region-up                    # Postgres on :55432
-eval "$(make -s dev-keys)"        # master key for credential encryption — keep it
-eval "$(make -s dev-token)"       # seed the dev account, mint a key
-make test                         # integration tests skip if the region is down
+make tools
+make console
+make proto
+make test
+```
 
-# a signed request, ready to paste once the front door listens at M2
-go run ./cmd/dariyactl sign --service func --url http://localhost:8080/ping
+`make tools` installs buf and the protoc plugins; `make console` installs the console's
+dependencies, which `make proto` needs because the TypeScript plugin lives in its `node_modules`.
+
+A signed request by hand, without the console:
+
+```sh
+go run ./cmd/dariyactl sign --service ws --url http://127.0.0.1:8080/ping
 ```
 
 Credentials are encrypted at rest under `DARIYA_MASTER_KEYS`, not hashed — verifying a signature
-means recomputing an HMAC, which needs the secret back. `make dev-keys` prints a **new** key every
-run; export it once and keep it, or previously minted credentials stop decrypting in a way that
-looks exactly like a signing bug.
+means recomputing an HMAC, which needs the secret back. `make dev-keys` prints **new** keys every
+run; export them once and keep them, or previously minted credentials stop decrypting and tokens
+stop verifying, both in ways that look exactly like a signing bug.
 
 ## Reading order
 
