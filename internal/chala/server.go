@@ -72,6 +72,9 @@ type Server struct {
 	guard   *servicekit.Guard
 	catalog catalog
 	cfg     Config
+
+	// unavailable holds local catalog images that were not built when chala booted.
+	unavailable map[string]bool
 }
 
 func New(d *docker.Client, guard *servicekit.Guard, cfg Config) (*Server, error) {
@@ -93,7 +96,7 @@ func New(d *docker.Client, guard *servicekit.Guard, cfg Config) (*Server, error)
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
-	return &Server{docker: d, guard: guard, catalog: cat, cfg: cfg}, nil
+	return &Server{docker: d, guard: guard, catalog: cat, cfg: cfg, unavailable: map[string]bool{}}, nil
 }
 
 // Handler serves chala's routes. The front door decides which action a request needs; chala
@@ -145,6 +148,10 @@ func (s *Server) runInstance(w http.ResponseWriter, r *http.Request) {
 	img, ok := s.catalog[req.GetImageId()]
 	if !ok {
 		s.fail(w, r, apierr.Validation("no image %q in the catalog — see DescribeImages", req.GetImageId()))
+		return
+	}
+	if s.unavailable[img.ID] {
+		s.fail(w, r, apierr.Validation("image %q is not built in this region yet", img.ID))
 		return
 	}
 	if err := validateTags(req.GetTags()); err != nil {
@@ -210,6 +217,7 @@ func (s *Server) runInstance(w http.ResponseWriter, r *http.Request) {
 		Aliases:     []string{DNSName(account, name)},
 		MemoryBytes: img.MemoryBytes,
 		PidsLimit:   img.PidsLimit,
+		Healthcheck: img.Healthcheck,
 	})
 	if errors.Is(err, docker.ErrConflict) {
 		// Lost the race to another create of the same name. Theirs is the instance now.
@@ -386,6 +394,9 @@ func (s *Server) describeImages(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := &chalav1.DescribeImagesResponse{}
 	for _, img := range s.catalog {
+		if s.unavailable[img.ID] {
+			continue
+		}
 		resp.Images = append(resp.Images, &chalav1.Image{ImageId: img.ID, Description: img.Description})
 	}
 	sort.Slice(resp.Images, func(i, j int) bool { return resp.Images[i].GetImageId() < resp.Images[j].GetImageId() })
@@ -453,6 +464,7 @@ func (s *Server) instance(c *docker.Container) *chalav1.Instance {
 		AccountId:          account,
 		ImageId:            c.Labels[labelImage],
 		State:              state(c.Status),
+		Health:             health(c.Health),
 		ExitCode:           int32(c.ExitCode),
 		Tags:               tagsFrom(c.Labels),
 		PrivateDnsName:     DNSName(account, name),
@@ -473,6 +485,21 @@ func state(status string) chalav1.InstanceState {
 		return chalav1.InstanceState_INSTANCE_STATE_TERMINATING
 	default:
 		return chalav1.InstanceState_INSTANCE_STATE_UNSPECIFIED
+	}
+}
+
+func health(h string) chalav1.InstanceHealth {
+	switch h {
+	case "":
+		return chalav1.InstanceHealth_INSTANCE_HEALTH_NONE
+	case "starting":
+		return chalav1.InstanceHealth_INSTANCE_HEALTH_STARTING
+	case "healthy":
+		return chalav1.InstanceHealth_INSTANCE_HEALTH_HEALTHY
+	case "unhealthy":
+		return chalav1.InstanceHealth_INSTANCE_HEALTH_UNHEALTHY
+	default:
+		return chalav1.InstanceHealth_INSTANCE_HEALTH_UNSPECIFIED
 	}
 }
 

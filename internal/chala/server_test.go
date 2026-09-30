@@ -339,7 +339,7 @@ func TestRetryStartsAPendingInstance(t *testing.T) {
 		Labels: map[string]string{labelKind: kindNetwork, labelAccount: acct}}); err != nil {
 		t.Fatal(err)
 	}
-	img := DefaultCatalog()[0]
+	img := mustImage(t, "img-shell")
 	if _, err := h.docker.CreateContainer(ctx, containerName(acct, "half"), docker.ContainerSpec{
 		Image: img.Ref, Cmd: img.Cmd, Network: NetworkName(acct),
 		Labels: instanceLabels(acct, "half", img.ID, map[string]string{"role": "client"}),
@@ -359,3 +359,14 @@ func TestRetryStartsAPendingInstance(t *testing.T) {
 }
 
 func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+func mustImage(t *testing.T, id string) Image {
+	t.Helper()
+	for _, img := range DefaultCatalog() {
+		if img.ID == id {
+			return img
+		}
+	}
+	t.Fatalf("no %s in the default catalog", id)
+	return Image{}
+}

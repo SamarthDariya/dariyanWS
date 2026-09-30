@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
+
+	"dariyanws/internal/chala/docker"
 )
 
 // Image is one catalog entry — the AMI analogue (DESIGN.md decision 13b).
@@ -24,11 +27,40 @@ type Image struct {
 
 	MemoryBytes int64
 	PidsLimit   int64
+
+	// Healthcheck is what HEALTHY means for this image.
+	Healthcheck *docker.Healthcheck
+
+	// Local images are built in this region, not pulled: the dariyanache engine is built from the
+	// track repo by `make engine-image`. A local image that has not been built is reported as
+	// unavailable rather than failing chala's boot, so a region that never runs a cache does not
+	// have to build one.
+	Local bool
 }
 
-// DefaultCatalog is what chala runs unless told otherwise. M8 adds the dariyanache engine.
+// EngineImage is the dariyanache engine, the image nache's nodes run.
+const EngineImage = "img-nache-engine"
+
+// DefaultCatalog is what chala runs unless told otherwise.
 func DefaultCatalog() []Image {
 	return []Image{
+		{
+			ID:          EngineImage,
+			Description: "The dariyanache engine, listening on 6379. Run by nache, not by hand.",
+			Ref:         "dariya/nache-engine:dev",
+			Local:       true,
+			MemoryBytes: 256 << 20,
+			PidsLimit:   256,
+			// A real PING in RESP, because the engine accepts arrays only — inline "PING\r\n"
+			// is a protocol error. The check is that the engine answers, not that the port is open.
+			Healthcheck: &docker.Healthcheck{
+				Shell:       `printf '*1\r\n$4\r\nPING\r\n' | nc -w 1 127.0.0.1 6379 | grep -q PONG`,
+				Interval:    time.Second,
+				Timeout:     time.Second,
+				StartPeriod: 5 * time.Second,
+				Retries:     3,
+			},
+		},
 		{
 			ID:          "img-shell",
 			Description: "A shell on the account network: the client, the bastion, the thing that runs `nc`.",
@@ -65,6 +97,12 @@ func (s *Server) PrepareImages(ctx context.Context, log *slog.Logger) error {
 			return err
 		}
 		if ok {
+			continue
+		}
+		if img.Local {
+			log.Warn("catalog image not built; RunInstance with it will be refused",
+				"image_id", img.ID, "ref", img.Ref, "build", "make engine-image")
+			s.unavailable[img.ID] = true
 			continue
 		}
 		log.Info("pulling catalog image", "image_id", img.ID, "ref", img.Ref)

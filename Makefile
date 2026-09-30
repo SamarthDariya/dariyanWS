@@ -67,6 +67,10 @@ console-dev:
 console-build:
 	cd console && npm run build
 
+## engine-image: build the dariyanache engine image from ../dariyanache (the track repo stays untouched)
+engine-image:
+	docker build -t dariya/nache-engine:dev -f deploy/images/nache-engine.Dockerfile ../dariyanache
+
 ## region-up: boot the region (Postgres now; front door from M2)
 region-up:
 	docker compose -f deploy/docker-compose.yml up -d
@@ -94,4 +98,4 @@ dev-token:
 		exit 1; }
 	@go run ./cmd/dariyactl bootstrap
 
-.PHONY: help tools proto lint breaking build test test-integration cpp cpp-test vectors console console-dev console-build region-up region-down region-nuke dev-keys dev-token
+.PHONY: engine-image help tools proto lint breaking build test test-integration cpp cpp-test vectors console console-dev console-build region-up region-down region-nuke dev-keys dev-token

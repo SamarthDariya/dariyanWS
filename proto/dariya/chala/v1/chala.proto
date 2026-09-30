@@ -47,6 +47,20 @@ enum InstanceState {
   INSTANCE_STATE_TERMINATING = 4;
 }
 
+// What the image's own health check says, when its catalog entry has one. RUNNING says the process
+// is alive; HEALTHY says it is doing its job, which is what a managed service means by
+// "available" (DESIGN.md decision 13g).
+enum InstanceHealth {
+  INSTANCE_HEALTH_UNSPECIFIED = 0;
+
+  // The image has no health check. RUNNING is all that can be said.
+  INSTANCE_HEALTH_NONE = 1;
+
+  INSTANCE_HEALTH_STARTING = 2;
+  INSTANCE_HEALTH_HEALTHY = 3;
+  INSTANCE_HEALTH_UNHEALTHY = 4;
+}
+
 message Instance {
   // Chosen by the caller, unique within the account, and a DNS label: 1–63 of [a-z0-9-], not
   // starting or ending with '-'. Caller-chosen rather than generated so that RunInstance is a
@@ -86,6 +100,8 @@ message Instance {
   string attached_account_id = 11;
   string attached_private_ip = 12;
   repeated string attached_dns_aliases = 13;
+
+  InstanceHealth health = 14;
 }
 
 // The AMI analogue. chala runs only what is in its catalog, so a caller cannot choose a registry

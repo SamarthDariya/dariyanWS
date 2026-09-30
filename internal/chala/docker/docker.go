@@ -266,6 +266,21 @@ type ContainerSpec struct {
 
 	MemoryBytes int64
 	PidsLimit   int64
+
+	// Healthcheck, if set, is run by the daemon inside the container.
+	Healthcheck *Healthcheck
+}
+
+// Healthcheck is a command the daemon runs periodically inside the container. It comes from the
+// catalog, never from a caller — it is a command executed in the container, and a caller-supplied
+// one would be arbitrary code with the container's privileges on a schedule.
+type Healthcheck struct {
+	// Shell is run with /bin/sh -c. Exit 0 is healthy.
+	Shell       string
+	Interval    time.Duration
+	Timeout     time.Duration
+	StartPeriod time.Duration
+	Retries     int
 }
 
 // CreateContainer creates, but does not start, a container called name.
@@ -298,6 +313,16 @@ func (c *Client) CreateContainer(ctx context.Context, name string, spec Containe
 				spec.Network: map[string]any{"Aliases": spec.Aliases},
 			},
 		},
+	}
+
+	if hc := spec.Healthcheck; hc != nil {
+		body["Healthcheck"] = map[string]any{
+			"Test":        []string{"CMD-SHELL", hc.Shell},
+			"Interval":    hc.Interval.Nanoseconds(),
+			"Timeout":     hc.Timeout.Nanoseconds(),
+			"StartPeriod": hc.StartPeriod.Nanoseconds(),
+			"Retries":     hc.Retries,
+		}
 	}
 
 	var out struct {
@@ -337,6 +362,10 @@ type Container struct {
 	Status   string
 	ExitCode int
 
+	// Health is the daemon's word for the health check's verdict — starting, healthy, unhealthy —
+	// or empty when the container has no health check.
+	Health string
+
 	// Networks maps network name to this container's address on it.
 	Networks map[string]string
 }
@@ -350,6 +379,9 @@ func (c *Client) InspectContainer(ctx context.Context, nameOrID string) (*Contai
 		State   struct {
 			Status   string
 			ExitCode int
+			Health   *struct {
+				Status string
+			}
 		}
 		Config struct {
 			Image  string
@@ -365,6 +397,10 @@ func (c *Client) InspectContainer(ctx context.Context, nameOrID string) (*Contai
 		return nil, err
 	}
 
+	health := ""
+	if raw.State.Health != nil {
+		health = raw.State.Health.Status
+	}
 	nets := make(map[string]string, len(raw.NetworkSettings.Networks))
 	for name, ep := range raw.NetworkSettings.Networks {
 		nets[name] = ep.IPAddress
@@ -377,6 +413,7 @@ func (c *Client) InspectContainer(ctx context.Context, nameOrID string) (*Contai
 		Created:  raw.Created,
 		Status:   raw.State.Status,
 		ExitCode: raw.State.ExitCode,
+		Health:   health,
 		Networks: nets,
 	}, nil
 }
