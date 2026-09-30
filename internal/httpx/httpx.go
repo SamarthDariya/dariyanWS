@@ -199,6 +199,33 @@ func WithRequestID(next http.Handler) http.Handler {
 	})
 }
 
+// AdoptRequestID is WithRequestID for a service behind the front door: it keeps the id the front
+// door minted, so one request is one id across every hop (DESIGN.md decision 12).
+//
+// The front door's rule against trusting a client's id still holds, because the only client a
+// service has is the front door. What is checked is the shape — 32 hex characters — so that a
+// request that arrives some other way cannot put arbitrary text into this service's logs. One
+// that fails the check gets a fresh id rather than a refusal: an id is for finding a request,
+// and losing the link is better than losing the request.
+func AdoptRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get(RequestIDHeader)
+		if !isRequestID(id) {
+			id = NewRequestID()
+		}
+		w.Header().Set(RequestIDHeader, id)
+		next.ServeHTTP(w, r.WithContext(withRequestID(r.Context(), id)))
+	})
+}
+
+func isRequestID(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
 // Recover turns a panic into a 500 with a request id.
 //
 // A panicking handler otherwise kills the whole front door, which — given decision 2 put every

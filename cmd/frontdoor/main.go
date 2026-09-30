@@ -39,6 +39,8 @@ func main() {
 		// not be exercised.
 		funcUpstream = flag.String("func-upstream", envOr("DARIYA_FUNC_UPSTREAM", ""),
 			"base URL of the func data plane, e.g. http://127.0.0.1:8081")
+		chalaUpstream = flag.String("chala-upstream", envOr("DARIYA_CHALA_UPSTREAM", ""),
+			"base URL of chala, the compute service, e.g. http://127.0.0.1:8082")
 	)
 	flag.Parse()
 
@@ -49,14 +51,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, *region, *dsn, *dev, *nocache, *funcUpstream, log); err != nil {
+	if err := run(ctx, *addr, *region, *dsn, *dev, *nocache, *funcUpstream, *chalaUpstream, log); err != nil {
 		log.Error("front door stopped", "error", err)
 		os.Exit(1)
 	}
 	log.Info("front door stopped")
 }
 
-func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, funcUpstream string, log *slog.Logger) error {
+func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, funcUpstream, chalaUpstream string, log *slog.Logger) error {
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
 		return err
@@ -98,6 +100,10 @@ func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, funcU
 		})
 	}
 
+	if chalaUpstream != "" {
+		routes = append(routes, chalaRoutes(region, chalaUpstream)...)
+	}
+
 	handler, _, err := frontdoor.NewHandler(accounts, policies, st, frontdoor.Options{
 		Region:          region,
 		Dev:             dev,
@@ -121,4 +127,30 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// chalaRoutes is chala's half of the table (DESIGN.md decision 13b). The front door decides the
+// action and the resource; chala checks that the capability agrees, so a route declared wrongly
+// here is a 403 from chala rather than a request authorized as something it is not.
+//
+// The prefix is spelled out rather than imported from internal/chala. chala is a service that
+// will graduate to its own repo, and the front door cannot import a repo it routes to — the path
+// is the contract between them, like every other route.
+func chalaRoutes(region, upstream string) []router.Route {
+	const prefix = "/chala/2026-09-30"
+	instance := router.PathResource(region, "chala", "instance", prefix+"/instances/")
+	account := router.SelfAccountResource(region, "chala")
+
+	return []router.Route{
+		{Service: "chala", Method: "PUT", Prefix: prefix + "/instances/",
+			Action: "chala:RunInstance", Resource: instance, Upstream: upstream},
+		{Service: "chala", Method: "GET", Prefix: prefix + "/instances/",
+			Action: "chala:DescribeInstance", Resource: instance, Upstream: upstream},
+		{Service: "chala", Method: "DELETE", Prefix: prefix + "/instances/",
+			Action: "chala:TerminateInstance", Resource: instance, Upstream: upstream},
+		{Service: "chala", Method: "GET", Prefix: prefix + "/instances",
+			Action: "chala:DescribeInstances", Resource: account, Upstream: upstream},
+		{Service: "chala", Method: "GET", Prefix: prefix + "/images",
+			Action: "chala:DescribeImages", Resource: account, Upstream: upstream},
+	}
 }

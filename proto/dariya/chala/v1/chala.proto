@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+// dariyachala — "Dariya chala", Dariya ran. The compute service: it starts machines, and nothing
+// else in the region may (DESIGN.md decision 13b).
+//
+// Its callers are managed-service control planes, which run instances in their own service
+// accounts (13c), and customers, who may run instances in theirs — the client that talks to a
+// cache is an instance too, because on macOS nothing else can reach an account network (13d).
+package dariya.chala.v1;
+
+import "dariya/common/v1/common.proto";
+
+option go_package = "dariyanws/gen/dariya/chala/v1;chalav1";
+
+// On the HTTP wire, under /chala/2026-09-30/:
+//
+//   PUT    instances/{name}   RunInstance         chala:RunInstance       instance/{name}
+//   GET    instances/{name}   DescribeInstance    chala:DescribeInstance  instance/{name}
+//   DELETE instances/{name}   TerminateInstance   chala:TerminateInstance instance/{name}
+//   GET    instances          DescribeInstances   chala:DescribeInstances account/{account}
+//   GET    images             DescribeImages      chala:DescribeImages    account/{account}
+service ChalaService {
+  rpc RunInstance(RunInstanceRequest) returns (RunInstanceResponse);
+  rpc DescribeInstance(DescribeInstanceRequest) returns (DescribeInstanceResponse);
+  rpc DescribeInstances(DescribeInstancesRequest) returns (DescribeInstancesResponse);
+  rpc TerminateInstance(TerminateInstanceRequest) returns (TerminateInstanceResponse);
+  rpc DescribeImages(DescribeImagesRequest) returns (DescribeImagesResponse);
+}
+
+// What the daemon says, in words that mean something to a caller. There is no TERMINATED: a
+// terminated instance is gone and Describe answers ResourceNotFound. EC2 keeps terminated
+// instances visible for an hour; that is a fidelity gap, and the reconciler does not need it.
+enum InstanceState {
+  INSTANCE_STATE_UNSPECIFIED = 0;
+
+  // Created, not yet started — or a RunInstance that died between the two. A retried
+  // RunInstance starts it.
+  INSTANCE_STATE_PENDING = 1;
+
+  INSTANCE_STATE_RUNNING = 2;
+
+  // The process exited. It stays exited: instances have no restart policy, because a death the
+  // daemon papers over is one the reconciler never sees (13g). exit_code says how.
+  INSTANCE_STATE_STOPPED = 3;
+
+  // Being removed.
+  INSTANCE_STATE_TERMINATING = 4;
+}
+
+message Instance {
+  // Chosen by the caller, unique within the account, and a DNS label: 1–63 of [a-z0-9-], not
+  // starting or ending with '-'. Caller-chosen rather than generated so that RunInstance is a
+  // PUT and a retry is the same request — a reconciler that names its nodes deterministically
+  // cannot create a duplicate by retrying.
+  string name = 1;
+
+  // arn:dariya:chala:hind-1:<account>:instance/<name>
+  string arn = 2;
+
+  string account_id = 3;
+
+  // From the catalog (DescribeImages). Never a registry reference — see Image.
+  string image_id = 4;
+
+  InstanceState state = 5;
+
+  // Meaningful only when STOPPED.
+  int32 exit_code = 6;
+
+  // Caller-owned metadata, and the way a control plane finds its own instances again after a
+  // crash (13g). At most 16; keys 1–63 of [A-Za-z0-9._-], values at most 255 bytes.
+  map<string, string> tags = 7;
+
+  // <name>.<account>.chala.dariya.internal — resolvable on the account's network only (13h).
+  string private_dns_name = 8;
+
+  // On the account's network. Changes when an instance is replaced; the DNS name does not.
+  string private_ip = 9;
+
+  int64 created_at_unix_ms = 10;
+}
+
+// The AMI analogue. chala runs only what is in its catalog, so a caller cannot choose a registry
+// reference, and a registry reference is how an image that does something unexpected gets in.
+message Image {
+  string image_id = 1;
+  string description = 2;
+}
+
+message RunInstanceRequest {
+  // In the path on the HTTP wire; a body value is overwritten by it.
+  string name = 1;
+  string image_id = 2;
+  map<string, string> tags = 3;
+}
+message RunInstanceResponse { Instance instance = 1; }
+
+message DescribeInstanceRequest { string name = 1; }
+message DescribeInstanceResponse { Instance instance = 1; }
+
+message DescribeInstancesRequest {
+  // Every tag must match. On the HTTP wire, query parameters tag.<key>=<value>.
+  map<string, string> tags = 1;
+  dariya.common.v1.PageRequest page = 2;
+}
+message DescribeInstancesResponse {
+  repeated Instance instances = 1;
+  dariya.common.v1.PageResponse page = 2;
+}
+
+message TerminateInstanceRequest { string name = 1; }
+message TerminateInstanceResponse {}
+
+message DescribeImagesRequest {}
+message DescribeImagesResponse { repeated Image images = 1; }

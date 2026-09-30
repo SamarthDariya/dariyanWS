@@ -50,7 +50,7 @@ func scratch(t *testing.T, c *Client) (string, map[string]string) {
 			_ = c.RemoveContainer(ctx, cid)
 		}
 		for _, n := range []string{"dtest-a-" + id, "dtest-b-" + id} {
-			_, _ = c.do(ctx, "DELETE", "/networks/"+n, nil, nil, nil)
+			_ = c.RemoveNetwork(ctx, n)
 		}
 	})
 	return id, labels

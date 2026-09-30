@@ -217,6 +217,17 @@ func (c *Client) EnsureNetwork(ctx context.Context, spec NetworkSpec) error {
 	return err
 }
 
+// RemoveNetwork deletes a network that has no containers left on it. chala does not call it yet —
+// an account network outlives its instances, and nothing deletes accounts — so today it is only
+// what tests clean up with.
+func (c *Client) RemoveNetwork(ctx context.Context, name string) error {
+	_, err := c.do(ctx, "DELETE", "/networks/"+name, nil, nil, nil)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
 // ---------------------------------------------------------------------------
 // Containers
 // ---------------------------------------------------------------------------

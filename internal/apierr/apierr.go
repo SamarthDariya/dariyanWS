@@ -30,6 +30,10 @@ const (
 	CodeInvalidSig     = "InvalidSignature"
 	CodeSigExpired     = "SignatureExpired"
 	CodeIdempotencyMis = "IdempotentParameterMismatch"
+
+	// Added at M7.3 for chala's per-account instance quota. A laptop is the whole region, and an
+	// account that could start containers without bound could take it down for every tenant.
+	CodeLimitExceeded = "LimitExceeded"
 )
 
 type Error struct {
@@ -86,7 +90,7 @@ func (e *Error) grpcCode() codes.Code {
 		return codes.AlreadyExists
 	case CodeAccessDenied:
 		return codes.PermissionDenied
-	case CodeThrottling:
+	case CodeThrottling, CodeLimitExceeded:
 		return codes.ResourceExhausted
 	case CodeInvalidSig, CodeSigExpired:
 		return codes.Unauthenticated
@@ -98,7 +102,7 @@ func (e *Error) grpcCode() codes.Code {
 // HTTPStatus is the edge mapping. Advisory: clients branch on Code.
 func (e *Error) HTTPStatus() int {
 	switch e.Code {
-	case CodeValidation, CodeIdempotencyMis:
+	case CodeValidation, CodeIdempotencyMis, CodeLimitExceeded:
 		return http.StatusBadRequest
 	case CodeNotFound:
 		return http.StatusNotFound

@@ -6,9 +6,11 @@ Every other repo here is a system — `dariyaraah` is a request path, `dariyakyu
 `dariyanache` is a cache. This one is what makes them a cloud instead of five unrelated daemons.
 It owns no resources of its own; services own theirs.
 
-**Status: M6 complete — there is a console.** The front door authenticates a signed request or a
-browser session, authorizes it against IAM policy, mints a capability, and proxies to a service
-that verifies it offline. A React console drives all of it.
+**Status: M7 in progress — the region can start machines.** The front door authenticates a signed
+request or a browser session, authorizes it against IAM policy, mints a capability, and proxies to
+a service that verifies it offline. A React console drives the IAM half. `chala`, the compute
+service, runs isolated instances on per-account Docker networks — the layer managed caches and
+queues will be built on (DESIGN.md decision 13).
 
 ```sh
 make region-up
@@ -37,7 +39,7 @@ Open the URL Vite prints and sign in with those two values.
 - **Contract** — protobuf in `proto/`, generated into Go (C++ and TypeScript when there are
   consumers). ARNs, errors, pagination, the event envelope, the capability token.
 - **Front door** — one endpoint. Verifies a signed request, asks IAM once, mints a short-lived
-  capability token, proxies to the owning service over gRPC.
+  capability token, proxies to the owning service over HTTP.
 - **Identity** — accounts, access keys, policy documents, and the evaluator. Deny wins, the
   default is deny, and a principal can never touch another account's resources however broad its
   policy is.
@@ -64,6 +66,29 @@ A signed request by hand, without the console:
 go run ./cmd/dariyactl sign --service ws --url http://127.0.0.1:8080/ping
 ```
 
+### Running an instance
+
+`chala` runs on the host, not in compose, because it holds the Docker socket and nothing else may.
+With Docker Desktop running and the keys from above exported:
+
+```sh
+make build
+./bin/chala --dev &
+./bin/frontdoor --dev --chala-upstream http://127.0.0.1:8082 &
+```
+
+Then, signed as the dev account (`dariyactl sign` prints a curl command; `eval` runs it):
+
+```sh
+eval "$(go run ./cmd/dariyactl sign --service chala --method PUT --url http://127.0.0.1:8080/chala/2026-09-30/instances/client-1 --body '{"imageId":"img-shell"}' 2>/dev/null)"
+eval "$(go run ./cmd/dariyactl sign --service chala --url http://127.0.0.1:8080/chala/2026-09-30/instances 2>/dev/null)"
+eval "$(go run ./cmd/dariyactl sign --service chala --method DELETE --url http://127.0.0.1:8080/chala/2026-09-30/instances/client-1 2>/dev/null)"
+```
+
+The instance is reachable only from its account's network, at
+`client-1.<account>.chala.dariya.internal`. On macOS the host cannot reach that network at all —
+that is decision 13d working, not a bug.
+
 Credentials are encrypted at rest under `DARIYA_MASTER_KEYS`, not hashed — verifying a signature
 means recomputing an HMAC, which needs the secret back. `make dev-keys` prints **new** keys every
 run; export them once and keep them, or previously minted credentials stop decrypting and tokens
@@ -86,8 +111,9 @@ and then went backwards. Four of five predictions about it were wrong.
 ```
 proto/     the contract, source of truth
 gen/       generated, not committed — `make proto`
-cmd/       frontdoor, dariyactl
-internal/  arn signing capability iam control store router httpx
+cmd/       frontdoor, dariyactl, chala (compute), echo
+internal/  arn signing capability iam control store router httpx servicekit
+internal/chala     the compute service — may import only the shared kit (internal/boundary)
 deploy/    the region (docker compose)
 ```
 
