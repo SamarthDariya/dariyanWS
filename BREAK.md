@@ -472,8 +472,57 @@ nothing anyway, since `Run` makes a pass the moment it starts. For node death, t
 whole difference, and it is deferred until chala can deliver one.
 
 **Predicted — Samarth:**
+_Not given. Asked in chat on 2026-09-30 (twice); the reply was "continue". Recorded as not given
+rather than left blank, or filled in after the run._
 
-**Predicted — Claude:**
+**Predicted — Claude** (written 2026-09-30, after the harness was committed and before it was ever
+run — including a smoke run):
+
+**A contamination to declare first.** Two timings were seen incidentally while building M8, before
+this was written: the engine health test took ~6.3 s, and the first end-to-end create reached
+`ACTIVE` in ~6.6 s. Both are anchors, and the reasoning below leans on them. So a correct health
+lag below is worth less than it looks — it was half-observed, not derived.
+
+The mechanics the predictions are built from:
+
+- the reconciler passes at start, then every 2 s;
+- `RunInstance` returns after the container has started, in well under a second;
+- the engine listens within milliseconds of starting, and its DNS alias exists before it starts
+  (13i attaches before starting);
+- **HEALTHY lags the start by ~5 s.** Docker's health checks during the start period run at the
+  start interval, which I believe defaults to 5 s whatever `Interval` says — which is also what the
+  6.3 s and 6.6 s above look like. This is the belief most likely to be wrong, and every system
+  number below inherits it.
+
+*orphan*
+
+1. **nache down, kill → healthy again: ~0.3 s.** A Go binary, one pool, one schema check.
+2. **system, kill → `ACTIVE`: ~6.3 s** (5–7.5 s). The restarted pass at ~0.3 s adopts the node but
+   sees STARTING; the passes at ~2.3 and ~4.3 s still do; the one at ~6.3 s sees HEALTHY. The crash
+   itself costs almost nothing — the number is the health lag, rounded up to the next pass.
+3. **client: zero failures after the first success, longest gap ≈ the probe's own cadence
+   (~60–100 ms).** This is the prediction that matters. nache dying does not touch the node, and
+   the node is what the client talks to: it is E1's result again, one layer up. A managed service
+   whose control plane is dead for a third of a second should be invisible to its data path.
+4. **duplicates: 1.** Deterministic names make the retry the same PUT. If this is 2, the whole of
+   13g is wrong.
+
+*nodedeath*
+
+1. **system, kill → replacement `AVAILABLE`: ~9 s** (8–10.5 s). The next pass lands uniformly in
+   0–2 s and terminates the dead node; the one after, 2 s later, starts the replacement; it
+   answers at once but reads HEALTHY only ~5 s later; the next pass on the 2 s grid records it.
+2. **client: longest gap ~3.5 s** (2.5–4.5 s). The client comes back when the replacement is
+   *listening*, about two passes after the kill — not when it is *healthy*.
+3. So **the record lags reality by ~5.5 s**: for most of the time Describe says the node is
+   IMPAIRED or starting, clients are already being served. I expect that gap, and not either
+   number on its own, to be the finding.
+4. **duplicates: 1**, because replacement is terminate-then-start across two passes (13h).
+
+**Where I think I am most likely to be wrong:** the 5 s health lag (if Docker checks at `Interval`
+during the start period, both system numbers drop by ~4 s and the record-vs-reality gap nearly
+closes); and the probe's cadence, since a `sh` loop forking `printf | nc | grep` every 50 ms on a
+Docker Desktop VM may be much slower than 50 ms, which would blur the client gap by its own period.
 
 **Measured:**
 
