@@ -275,3 +275,21 @@ func TestPrefixMatchesOnlyAtASegmentBoundary(t *testing.T) {
 		}
 	}
 }
+
+// The account resource is built from the principal on both sides of the slash, so a request has
+// nothing to say about whose account it acts on — and it must agree byte for byte with what
+// servicekit.AuthorizeAccount expects, or every list route is a 403.
+func TestSelfAccountResource(t *testing.T) {
+	build := SelfAccountResource(region, "chala")
+
+	for _, acct := range []string{account, other} {
+		got, err := build(httptest.NewRequest("GET", "/chala/instances?account="+other, nil), principal(acct))
+		if err != nil {
+			t.Fatalf("SelfAccountResource: %v", err)
+		}
+		want := "arn:dariya:chala:hind-1:" + acct + ":account/" + acct
+		if got != want {
+			t.Errorf("resource = %q, want %q", got, want)
+		}
+	}
+}

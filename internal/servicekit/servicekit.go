@@ -15,6 +15,15 @@
 // first and checking it afterwards — reinventing the hole M4.4 had just closed. The account is
 // now the one field a service cannot supply and cannot get wrong.
 //
+// # What changed at M7.1
+//
+// The second service found the first gap, which is what decision 9 was reserved for. An Intent
+// names one resource by type and id, and a LIST names none: chala's DescribeInstances acts on
+// the caller's account as a whole. The obvious encoding — ResourceType "account", ResourceID the
+// account — is unwriteable, because the id would be the one thing a service cannot know before
+// verifying. AuthorizeAccount is the second shape, and it takes the account from the token for
+// the same reason Authorize does.
+//
 // # What changed at M4.4
 //
 // The helper that could be misused is gone rather than documented. `Guard.Authorize` cannot be
@@ -114,6 +123,15 @@ func (g *Guard) Authorize(r *http.Request, intent Intent) (*capabilityv1.Capabil
 			"servicekit: intent must state an action, a resource type and a resource id")
 	}
 
+	return g.authorize(r, intent.Action, func(account string) string {
+		return fmt.Sprintf("arn:dariya:%s:%s:%s:%s/%s",
+			g.service, g.region, account, intent.ResourceType, intent.ResourceID)
+	})
+}
+
+// authorize is the shared verification. expectedFor assembles the resource the token must name,
+// given the account from the verified token — never from the request.
+func (g *Guard) authorize(r *http.Request, action string, expectedFor func(account string) string) (*capabilityv1.Capability, error) {
 	header := r.Header.Get(httpx.CapabilityHeader)
 	if header == "" {
 		return nil, ErrNoCapability
@@ -134,15 +152,14 @@ func (g *Guard) Authorize(r *http.Request, intent Intent) (*capabilityv1.Capabil
 		return nil, err
 	}
 
-	if cap.GetAction() != intent.Action {
+	if cap.GetAction() != action {
 		return nil, fmt.Errorf("%w: authorises %q, this request is %q",
-			ErrMismatch, cap.GetAction(), intent.Action)
+			ErrMismatch, cap.GetAction(), action)
 	}
 
 	// The expected ARN, assembled rather than supplied. Everything in it comes either from this
 	// process's configuration or from the verified token — nothing from the request.
-	expected := fmt.Sprintf("arn:dariya:%s:%s:%s:%s/%s",
-		g.service, g.region, cap.GetAccountId(), intent.ResourceType, intent.ResourceID)
+	expected := expectedFor(cap.GetAccountId())
 
 	// Exact string equality, not a prefix and not a pattern. This is the line E4 was about.
 	if cap.GetResourceArn() != expected {
@@ -160,4 +177,23 @@ func (g *Guard) Authorize(r *http.Request, intent Intent) (*capabilityv1.Capabil
 	}
 
 	return cap, nil
+}
+
+// AuthorizeAccount is Authorize for an operation on the caller's account as a whole — a list, or
+// a create whose resource has no name yet.
+//
+// The expected resource is arn:dariya:<service>:<region>:<account>:account/<account>, with both
+// account fields taken from the verified token. It exists because Intent cannot express this
+// shape without asking the service for the account, and a service that has to supply the
+// account before verifying is a service that reads the token first — the hole M5.3 closed.
+func (g *Guard) AuthorizeAccount(r *http.Request, action string) (*capabilityv1.Capability, error) {
+	if action == "" {
+		return nil, fmt.Errorf("servicekit: an account-scoped intent must state an action")
+	}
+
+	// Verified through the same path as a named resource, with the id filled in once the account
+	// is known. Only the ARN assembly differs, so every other check stays in one place.
+	return g.authorize(r, action, func(account string) string {
+		return fmt.Sprintf("arn:dariya:%s:%s:%s:account/%s", g.service, g.region, account, account)
+	})
 }

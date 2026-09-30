@@ -181,6 +181,16 @@ func AccountResource(region, service, resourceType, id string) func(*http.Reques
 	}
 }
 
+// SelfAccountResource is the resource for an operation on the caller's account as a whole: a
+// list, or a create whose resource has no name yet. Both account fields come from the principal,
+// so there is no request that could name another — the shape servicekit.AuthorizeAccount checks.
+func SelfAccountResource(region, service string) func(*http.Request, *commonv1.Principal) (string, error) {
+	return func(_ *http.Request, p *commonv1.Principal) (string, error) {
+		return fmt.Sprintf("arn:dariya:%s:%s:%s:account/%s",
+			service, region, p.GetAccountId(), p.GetAccountId()), nil
+	}
+}
+
 // PathResource builds an ARN whose id is a path segment after the route's prefix.
 //
 // Only the id comes from the path; the account still comes from the principal. The segment is

@@ -302,6 +302,23 @@ Left empty on purpose. The contract is currently validated by exactly one consum
 nothing. When `dariyafunc` is joined by service number two, whatever the contract got wrong gets
 written here rather than quietly patched.
 
+The second service turned out to be `chala` (decision 13), not `dariyafunc`'s successor. What it
+has forced so far:
+
+**9.1 (M7.1) — an Intent could not name an account.** `servicekit.Intent` states one resource by
+type and id, which fits every call `cmd/echo` makes and none of the calls a list makes:
+`DescribeInstances` acts on the caller's account as a whole. The encoding that fits the existing
+struct — `ResourceType: "account", ResourceID: <account>` — is unwriteable, because the id is then
+the one value a service cannot know until it has verified the token, which is the read-then-check
+order M5.3 removed. So there is a second shape, `Guard.AuthorizeAccount(r, action)`, expecting
+`arn:dariya:<service>:<region>:<acct>:account/<acct>` with both accounts taken from the verified
+token, and a matching `router.SelfAccountResource` on the front door's side. The control plane's
+own `iam:*` account routes were already building exactly this ARN by hand; they now use the helper,
+so the two sides cannot disagree about its spelling.
+
+The lesson is the one the thesis predicted: a contract validated by one consumer had quietly
+encoded that consumer's shape — every echo request names a function — as if it were universal.
+
 ### 10. Access key secrets are encrypted at rest, not hashed.
 
 Amendment, forced during M1 by writing the schema. `account.proto` originally said secrets were

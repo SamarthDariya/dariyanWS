@@ -1,10 +1,8 @@
 package controlapi
 
 import (
-	"fmt"
 	"net/http"
 
-	commonv1 "dariyanws/gen/dariya/common/v1"
 	controlv1 "dariyanws/gen/dariya/control/v1"
 	iamv1 "dariyanws/gen/dariya/iam/v1"
 	"dariyanws/internal/apierr"
@@ -35,10 +33,7 @@ func (a *API) Routes() []router.Route {
 
 	// selfAccount is the resource for operations on the caller's own account. The id comes from
 	// the principal, so there is no path that could name another.
-	selfAccount := func(_ *http.Request, p *commonv1.Principal) (string, error) {
-		return fmt.Sprintf("arn:dariya:iam:%s:%s:account/%s",
-			region, p.GetAccountId(), p.GetAccountId()), nil
-	}
+	selfAccount := router.SelfAccountResource(region, Service)
 
 	routes := []router.Route{
 		{
