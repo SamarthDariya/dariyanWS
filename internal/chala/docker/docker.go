@@ -438,3 +438,65 @@ func (c *Client) ListContainers(ctx context.Context, labels []string) ([]string,
 	}
 	return ids, nil
 }
+
+// LogLine is one line a container wrote, with the daemon's timestamp for it.
+type LogLine struct {
+	Time time.Time
+	Text string
+}
+
+// Logs returns everything a container has written to stdout, timestamped by the daemon. Only the
+// harnesses use it: the timestamps come from the daemon's clock, so intervals between two lines
+// are measured on one clock even when the host's and the VM's disagree.
+func (c *Client) Logs(ctx context.Context, id string) ([]LogLine, error) {
+	u := "http://docker/" + APIVersion + "/containers/" + id + "/logs?stdout=1&timestamps=1"
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("docker: logs of %s: %d", id, resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Without a TTY the stream is multiplexed: an 8-byte header (stream, 3 zero bytes, uint32
+	// big-endian length) before each frame.
+	var text strings.Builder
+	for len(raw) >= 8 {
+		n := int(raw[4])<<24 | int(raw[5])<<16 | int(raw[6])<<8 | int(raw[7])
+		if 8+n > len(raw) {
+			break
+		}
+		text.Write(raw[8 : 8+n])
+		raw = raw[8+n:]
+	}
+
+	var out []LogLine
+	for _, line := range strings.Split(text.String(), "\n") {
+		ts, rest, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			continue
+		}
+		out = append(out, LogLine{Time: t, Text: strings.TrimSpace(rest)})
+	}
+	return out, nil
+}
+
+// Kill sends SIGKILL, leaving the container stopped rather than removed — a death, for the
+// reconciler to notice. Harness only.
+func (c *Client) Kill(ctx context.Context, id string) error {
+	_, err := c.do(ctx, "POST", "/containers/"+id+"/kill", url.Values{"signal": {"KILL"}}, nil, nil)
+	return err
+}

@@ -26,6 +26,11 @@ type Reconciler struct {
 	Log     *slog.Logger
 	Now     func() time.Time
 
+	// AfterRunNode, if set, runs after chala has accepted a RunNode and before the observation is
+	// written back. It exists for one purpose: BREAK.md E5 kills the process exactly there, the
+	// window where the node exists and the row does not know it. Nil in every normal run.
+	AfterRunNode func(c *store.Cluster)
+
 	wake chan struct{}
 }
 
@@ -146,6 +151,9 @@ func (r *Reconciler) reconcile(ctx context.Context, c *store.Cluster, nodes []*c
 		// Missing: never created, or terminated by the previous pass for being dead.
 		if _, err := r.Compute.RunNode(ctx, c); err != nil {
 			return err
+		}
+		if r.AfterRunNode != nil {
+			r.AfterRunNode(c)
 		}
 
 	case node.GetState() == chalav1.InstanceState_INSTANCE_STATE_PENDING:

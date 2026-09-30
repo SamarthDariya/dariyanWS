@@ -34,6 +34,10 @@ func main() {
 		period = flag.Duration("period", 2*time.Second, "reconciler period — the worst-case detection latency")
 		max    = flag.Int("max-clusters", 5, "cache clusters one account may have")
 		dev    = flag.Bool("dev", os.Getenv("DARIYA_DEV") == "1", "development mode")
+
+		// BREAK.md E5 only. A planted fault, like E4's planted bug, and just as clearly labelled.
+		e5Crash = flag.Bool("e5-crash-after-run", false,
+			"E5: exit immediately after the first RunNode, before its observation is written")
 	)
 	flag.Parse()
 
@@ -41,13 +45,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, *region, *dsn, *frontDoor, *period, *max, *dev, log); err != nil {
+	if err := run(ctx, *addr, *region, *dsn, *frontDoor, *period, *max, *dev, *e5Crash, log); err != nil {
 		log.Error("nache stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, addr, region, dsn, frontDoor string, period time.Duration, max int, dev bool, log *slog.Logger) error {
+func run(ctx context.Context, addr, region, dsn, frontDoor string, period time.Duration, max int, dev, e5Crash bool, log *slog.Logger) error {
 	// nache's service-account credentials, from `dariyactl service-account --service nache`.
 	keyID, secret := os.Getenv("NACHE_ACCESS_KEY_ID"), os.Getenv("NACHE_SECRET_ACCESS_KEY")
 	if keyID == "" || secret == "" {
@@ -76,6 +80,15 @@ func run(ctx context.Context, addr, region, dsn, frontDoor string, period time.D
 		},
 		Period: period,
 		Log:    log.With("component", "reconciler"),
+	}
+	if e5Crash {
+		// os.Exit runs no deferred function and flushes nothing, so as far as the store and chala
+		// can tell this is kill -9 at the worst possible instant. The difference from a real
+		// SIGKILL — it can only happen here, never mid-write — is E5's stated fidelity gap.
+		rec.AfterRunNode = func(c *store.Cluster) {
+			log.Warn("E5: exiting between RunNode and the row update", "cluster", c.Name)
+			os.Exit(137)
+		}
 	}
 	go rec.Run(ctx)
 

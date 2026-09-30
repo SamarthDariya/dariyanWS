@@ -441,17 +441,35 @@ kinds of safety by some distance.
 provisioning a non-event. Nothing leaks, nothing is duplicated, and the cluster converges within
 one loop period without anyone noticing it happened.
 
-**Setup (M9):** create a cache cluster, and `kill -9` the `nache` process after chala has started
-the instance but before the cluster's row records it. Restart `nache`. Measure, from the kill:
+**Setup (M9.2), as built — `go run ./cmd/e5 orphan` and `go run ./cmd/e5 nodedeath`.** Two runs,
+because there are two faults a managed cache has to survive and they exercise different halves:
 
-1. time until the orphaned instance is adopted (or terminated) — the system's number;
-2. time a client instance looping `PING` against the cluster's DNS endpoint sees no answer — the
-   client's number;
-3. the count of instances tagged for the cluster at every point in between. Anything above one is
-   a duplicate, and the claim fails.
+- **orphan.** `nache` exits inside the reconciler immediately after chala accepted `RunNode` and
+  before the observation is written (`--e5-crash-after-run`, a planted fault like E4's planted bug).
+  It is restarted at once, as a supervisor would restart it.
+- **nodedeath.** `nache` runs normally; the node is `SIGKILL`ed behind its back.
 
-Then run it a second time with an "instance exited" hint waking the loop early, and measure how
-much of the gap that closes.
+Three numbers per run, each on the clock it belongs to:
+
+1. **system** — from the fault until Describe says the cluster is whole (host clock; the host both
+   injects the fault and polls);
+2. **client** — the longest gap between successful `PING`s seen by a probe looping every ~50 ms on
+   the customer's network (the daemon's clock, from its timestamps on the probe's output, so the
+   interval is measured on one clock even if host and VM disagree);
+3. **duplicates** — the most instances tagged for the cluster at once. Above one, the claim fails
+   however good the other two are.
+
+Fidelity gaps, stated before running: the probe is a hand-started `docker run` on the customer
+network, because chala has no exec and a client instance cannot report back; and the orphan fault
+fires at exactly the worst instant from inside the process, never mid-write, which a real SIGKILL
+could.
+
+**The second run the decision promised — the same faults with an "instance exited" hint — cannot be
+built yet, and why is worth writing down.** A hint needs chala to tell nache something happened.
+chala has no way to push: the internal wire has had no streaming since the M5 amendment to decision
+3, and that note said the bill would arrive later. It has. For the orphan fault a hint would change
+nothing anyway, since `Run` makes a pass the moment it starts. For node death, the hint is the
+whole difference, and it is deferred until chala can deliver one.
 
 **Predicted — Samarth:**
 
