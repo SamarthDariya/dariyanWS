@@ -6,11 +6,12 @@ Every other repo here is a system — `dariyaraah` is a request path, `dariyakyu
 `dariyanache` is a cache. This one is what makes them a cloud instead of five unrelated daemons.
 It owns no resources of its own; services own theirs.
 
-**Status: M7 in progress — the region can start machines.** The front door authenticates a signed
+**Status: M8 complete — you can create a managed cache.** The front door authenticates a signed
 request or a browser session, authorizes it against IAM policy, mints a capability, and proxies to
 a service that verifies it offline. A React console drives the IAM half. `chala`, the compute
-service, runs isolated instances on per-account Docker networks — the layer managed caches and
-queues will be built on (DESIGN.md decision 13).
+service, runs isolated instances on per-account Docker networks, and `nache` is a managed
+dariyanache on top of it: create a cluster, and a reconciler makes it real, keeps it alive, and
+hands you a stable endpoint on your own network (DESIGN.md decision 13).
 
 ```sh
 make region-up
@@ -100,6 +101,21 @@ eval "$(go run ./cmd/dariyactl service-account --service nache)"
 `service-account` exports `DARIYA_SERVICE_ACCOUNTS`, which is how chala learns which accounts may
 attach across tenants. Without it, every attach is an `AccessDenied`.
 
+### Creating a cache
+
+```sh
+make engine-image
+./bin/chala --dev &
+./bin/frontdoor --dev --chala-upstream http://127.0.0.1:8082 --nache-upstream http://127.0.0.1:8083 &
+./bin/nache --dev &
+eval "$(go run ./cmd/dariyactl sign --service nache --method PUT --url http://127.0.0.1:8080/nache/2026-09-30/clusters/sessions 2>/dev/null)"
+eval "$(go run ./cmd/dariyactl sign --service nache --url http://127.0.0.1:8080/nache/2026-09-30/clusters/sessions 2>/dev/null)"
+```
+
+The first call answers `202 CREATING`; describe it until it is `ACTIVE`. The endpoint,
+`sessions.<account>.nache.dariya.internal:6379`, answers only on your account's network, so the
+client has to be there too. The node's data does not survive the node — see decision 13j.
+
 Credentials are encrypted at rest under `DARIYA_MASTER_KEYS`, not hashed — verifying a signature
 means recomputing an HMAC, which needs the secret back. `make dev-keys` prints **new** keys every
 run; export them once and keep them, or previously minted credentials stop decrypting and tokens
@@ -122,9 +138,10 @@ and then went backwards. Four of five predictions about it were wrong.
 ```
 proto/     the contract, source of truth
 gen/       generated, not committed — `make proto`
-cmd/       frontdoor, dariyactl, chala (compute), echo
+cmd/       frontdoor, dariyactl, chala (compute), nache (managed cache), echo
 internal/  arn signing capability iam control store router httpx servicekit
 internal/chala     the compute service — may import only the shared kit (internal/boundary)
+internal/nache     the managed cache: API, store (its own database), reconciler
 deploy/    the region (docker compose)
 ```
 

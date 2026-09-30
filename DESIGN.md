@@ -398,8 +398,8 @@ principal, and it ends up in environment variables.
 and `cmd/nache`, following `cmd/echo`. Decision 1 is amended accordingly: a service *graduates* to
 its own repo once its API has stopped moving. What makes that honest rather than a monorepo by
 stealth is a test, not a comment: a service package may import only `servicekit`, `capability`,
-`httpx`, `apierr`, `arn` and `gen/`, never `store`, `iam`, `authz` or anything else the control
-plane owns. Graduating is then a mechanical move, because the boundary was already real. *Rejected:
+`httpx`, `apierr`, `arn`, `signing` (added at M8.3) and `gen/`, never `store`, `iam`, `authz` or
+anything else the control plane owns. Graduating is then a mechanical move, because the boundary was already real. *Rejected:
 two new repos now* — the module is the bare name `dariyanws`, `servicekit` sits under `internal/`,
 and `gen/` is gitignored, so it would first need a "make this repo a library" milestone that is all
 plumbing and no cache.
@@ -460,6 +460,43 @@ a grant the customer holds and can revoke — is still deferred to `dariyafunc`'
 `dariyactl service-account --service nache` seeds the account, with a policy of `chala:*` on its own
 account and nothing else, not bootstrap's `*`. A compromised cache control plane can then start
 containers in its own account, but cannot rewrite its own IAM.
+
+**13j (M8). What building `nache` settled, taken without a separate discussion and listed so each
+can be argued with.**
+
+- *A cluster is one node.* No replicas, no shards: units 3+4 (replication, lag) are where those
+  come from, and a managed cache that pretended to have them would be pretending.
+- *`nache` has its own Postgres **database**, not a schema.* A query joining a cluster to an access
+  key cannot be written at all, which is decision 1 made physical rather than conventional.
+- *The API never calls chala.* Create writes a row and returns 202; Describe reads the row,
+  including the nodes the reconciler last *observed*. Describe keeps answering with chala down, and
+  a slow container start can never be a slow request.
+- *13i's rule is in the types.* `store.Cluster`'s account is unexported; the only constructor is
+  `store.Create(ctx, *capabilityv1.Capability, name)`; `Compute.RunNode` takes a `*store.Cluster`
+  and has no parameter naming an account. The reconciler cannot attach a node anywhere but
+  `cluster.Account()`, because no other account is in reach.
+- *Node names are deterministic* (`n-<account>-<cluster>`), so `RunNode` is the same PUT on every
+  retry and a crash between "chala started it" and "nache recorded it" leaves a node to adopt, not
+  a duplicate.
+- *`AVAILABLE` means the engine answered a RESP `PING`*, via a health check chala runs from the
+  catalog — not that a port is open, and not merely that the process is alive.
+- *A dead or unhealthy node is replaced terminate-then-start, across two passes*, under the same
+  name and alias; the cluster stays `ACTIVE` with an `IMPAIRED` node rather than going back to
+  `CREATING`.
+- *`nache` calls chala through the front door*, signed as its service account. Going around the
+  door would make nache the one principal in the region no policy governs. `internal/signing`
+  joined the shared kit for it.
+
+**Found at M8.4, and not fixed: a replaced node loses its data.** Verified end to end — `SET hello`,
+kill the node, the reconciler replaces it at the same endpoint, `GET hello` returns nil. The engine
+does write its AOF and RDB, but into the container's writable layer, which is removed with the
+container. It cannot write anywhere else, because 13b forbids chala from expressing a mount. So two
+decisions collide: *no mounts* (a security claim) costs *dariyanache its persistence* (the engine's
+own M-something feature), and nobody noticed until a node died. The honest statement is that
+managed `nache` is an **ephemeral** cache today, which is what ElastiCache-without-replication is
+too — AWS's answer is replicas, not disks. The fix, if one is wanted, is a chala-owned volume type
+(named, per instance, created and destroyed by chala, never a host path) — a new, narrow thing
+chala can express, rather than lifting the ban on mounts.
 
 **What this adds to `BREAK.md`:** E5, the orphan. `kill -9` the `nache` process between
 `RunInstance` and the row update, predict first, then measure how long until the reconciler adopts

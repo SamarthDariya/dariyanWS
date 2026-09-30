@@ -58,3 +58,33 @@ func TestChalaRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestNacheRoutes(t *testing.T) {
+	table, err := router.NewTable("hind-1", nacheRoutes("hind-1", "http://127.0.0.1:1"))
+	if err != nil {
+		t.Fatalf("NewTable: %v", err)
+	}
+	target := table.TargetFor()
+	p := &commonv1.Principal{AccountId: "000000000001",
+		PrincipalArn: "arn:dariya:iam:hind-1:000000000001:user/root"}
+
+	const acct = "arn:dariya:nache:hind-1:000000000001:account/000000000001"
+	const c1 = "arn:dariya:nache:hind-1:000000000001:cluster/c1"
+
+	for _, c := range []struct{ method, path, action, resource string }{
+		{"PUT", "/nache/2026-09-30/clusters/c1", "nache:CreateCacheCluster", c1},
+		{"GET", "/nache/2026-09-30/clusters/c1", "nache:DescribeCacheCluster", c1},
+		{"DELETE", "/nache/2026-09-30/clusters/c1", "nache:DeleteCacheCluster", c1},
+		{"GET", "/nache/2026-09-30/clusters", "nache:ListCacheClusters", acct},
+	} {
+		got, err := target(httptest.NewRequest(c.method, c.path, nil), p)
+		if err != nil {
+			t.Errorf("%s %s: %v", c.method, c.path, err)
+			continue
+		}
+		if got.Action != c.action || got.ResourceARN != c.resource {
+			t.Errorf("%s %s = %s on %s, want %s on %s",
+				c.method, c.path, got.Action, got.ResourceARN, c.action, c.resource)
+		}
+	}
+}

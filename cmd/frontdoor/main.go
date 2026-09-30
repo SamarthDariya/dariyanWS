@@ -41,6 +41,8 @@ func main() {
 			"base URL of the func data plane, e.g. http://127.0.0.1:8081")
 		chalaUpstream = flag.String("chala-upstream", envOr("DARIYA_CHALA_UPSTREAM", ""),
 			"base URL of chala, the compute service, e.g. http://127.0.0.1:8082")
+		nacheUpstream = flag.String("nache-upstream", envOr("DARIYA_NACHE_UPSTREAM", ""),
+			"base URL of nache, the managed cache, e.g. http://127.0.0.1:8083")
 	)
 	flag.Parse()
 
@@ -51,14 +53,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, *region, *dsn, *dev, *nocache, *funcUpstream, *chalaUpstream, log); err != nil {
+	if err := run(ctx, *addr, *region, *dsn, *dev, *nocache, *funcUpstream, *chalaUpstream, *nacheUpstream, log); err != nil {
 		log.Error("front door stopped", "error", err)
 		os.Exit(1)
 	}
 	log.Info("front door stopped")
 }
 
-func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, funcUpstream, chalaUpstream string, log *slog.Logger) error {
+func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, funcUpstream, chalaUpstream, nacheUpstream string, log *slog.Logger) error {
 	st, err := store.Open(ctx, dsn)
 	if err != nil {
 		return err
@@ -102,6 +104,9 @@ func run(ctx context.Context, addr, region, dsn string, dev, nocache bool, funcU
 
 	if chalaUpstream != "" {
 		routes = append(routes, chalaRoutes(region, chalaUpstream)...)
+	}
+	if nacheUpstream != "" {
+		routes = append(routes, nacheRoutes(region, nacheUpstream)...)
 	}
 
 	handler, _, err := frontdoor.NewHandler(accounts, policies, st, frontdoor.Options{
@@ -152,5 +157,24 @@ func chalaRoutes(region, upstream string) []router.Route {
 			Action: "chala:DescribeInstances", Resource: account, Upstream: upstream},
 		{Service: "chala", Method: "GET", Prefix: prefix + "/images",
 			Action: "chala:DescribeImages", Resource: account, Upstream: upstream},
+	}
+}
+
+// nacheRoutes is the managed cache's half of the table. Same shape as chala's, and spelled out for
+// the same reason.
+func nacheRoutes(region, upstream string) []router.Route {
+	const prefix = "/nache/2026-09-30"
+	cluster := router.PathResource(region, "nache", "cluster", prefix+"/clusters/")
+
+	return []router.Route{
+		{Service: "nache", Method: "PUT", Prefix: prefix + "/clusters/",
+			Action: "nache:CreateCacheCluster", Resource: cluster, Upstream: upstream},
+		{Service: "nache", Method: "GET", Prefix: prefix + "/clusters/",
+			Action: "nache:DescribeCacheCluster", Resource: cluster, Upstream: upstream},
+		{Service: "nache", Method: "DELETE", Prefix: prefix + "/clusters/",
+			Action: "nache:DeleteCacheCluster", Resource: cluster, Upstream: upstream},
+		{Service: "nache", Method: "GET", Prefix: prefix + "/clusters",
+			Action: "nache:ListCacheClusters", Resource: router.SelfAccountResource(region, "nache"),
+			Upstream: upstream},
 	}
 }
