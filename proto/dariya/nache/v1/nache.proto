@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+// nache — the managed cache (DESIGN.md decision 13). The service; dariyanache is its engine, as
+// Redis is ElastiCache's.
+//
+// A cache cluster is a record, not a process. CreateCacheCluster writes the record and returns
+// at once with state CREATING; a reconciler makes it true (13g) and the caller polls Describe.
+package dariya.nache.v1;
+
+import "dariya/common/v1/common.proto";
+
+option go_package = "dariyanws/gen/dariya/nache/v1;nachev1";
+
+// On the HTTP wire, under /nache/2026-09-30/:
+//
+//   PUT    clusters/{name}   CreateCacheCluster     nache:CreateCacheCluster    cluster/{name}
+//   GET    clusters/{name}   DescribeCacheCluster   nache:DescribeCacheCluster  cluster/{name}
+//   DELETE clusters/{name}   DeleteCacheCluster     nache:DeleteCacheCluster    cluster/{name}
+//   GET    clusters          ListCacheClusters      nache:ListCacheClusters     account/{account}
+service NacheService {
+  rpc CreateCacheCluster(CreateCacheClusterRequest) returns (CreateCacheClusterResponse);
+  rpc DescribeCacheCluster(DescribeCacheClusterRequest) returns (DescribeCacheClusterResponse);
+  rpc DeleteCacheCluster(DeleteCacheClusterRequest) returns (DeleteCacheClusterResponse);
+  rpc ListCacheClusters(ListCacheClustersRequest) returns (ListCacheClustersResponse);
+}
+
+// A node as the reconciler last saw it. Observed, not live: Describe reads the record, never
+// chala, so describing a cluster does not depend on the compute service being up.
+enum CacheNodeStatus {
+  CACHE_NODE_STATUS_UNSPECIFIED = 0;
+  // Asked for, not yet answering.
+  CACHE_NODE_STATUS_CREATING = 1;
+  // Answering PING.
+  CACHE_NODE_STATUS_AVAILABLE = 2;
+  // Running but failing its health check, or stopped and about to be replaced.
+  CACHE_NODE_STATUS_IMPAIRED = 3;
+}
+
+message CacheNode {
+  string node_id = 1;
+  CacheNodeStatus status = 2;
+  int64 observed_at_unix_ms = 3;
+}
+
+message CacheCluster {
+  // 1–40 of [a-z0-9-], not starting or ending with '-'. Unique within the account.
+  string name = 1;
+
+  // arn:dariya:nache:hind-1:<account>:cluster/<name>
+  string arn = 2;
+
+  string account_id = 3;
+
+  // CREATING until the node answers, then ACTIVE. DELETING until the node is gone, then the
+  // cluster is gone. ACTIVE → CREATING never happens: a replaced node is visible in nodes[],
+  // not as the cluster un-existing.
+  dariya.common.v1.ResourceState state = 4;
+
+  // <name>.<account>.nache.dariya.internal:6379 — resolvable from the account's own network only
+  // (13d, 13h). Stable across node replacement; populated from the moment of creation, because
+  // it is derived from the name and not from where the node happens to be.
+  string endpoint = 5;
+
+  repeated CacheNode nodes = 6;
+
+  int64 created_at_unix_ms = 7;
+  int64 updated_at_unix_ms = 8;
+}
+
+message CreateCacheClusterRequest {
+  // In the path on the HTTP wire; a body value is overwritten by it.
+  string name = 1;
+}
+message CreateCacheClusterResponse { CacheCluster cluster = 1; }
+
+message DescribeCacheClusterRequest { string name = 1; }
+message DescribeCacheClusterResponse { CacheCluster cluster = 1; }
+
+message DeleteCacheClusterRequest { string name = 1; }
+message DeleteCacheClusterResponse { CacheCluster cluster = 1; }
+
+message ListCacheClustersRequest { dariya.common.v1.PageRequest page = 1; }
+message ListCacheClustersResponse {
+  repeated CacheCluster clusters = 1;
+  dariya.common.v1.PageResponse page = 2;
+}
