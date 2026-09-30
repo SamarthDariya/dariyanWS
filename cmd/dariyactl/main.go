@@ -7,6 +7,7 @@
 // the authorisation the first way has. It moves onto the API at M5.
 //
 //	dariyactl bootstrap                    seed a dev account and mint credentials
+//	dariyactl service-account --service nache   seed a managed service's own account
 //	dariyactl account create --name NAME
 //	dariyactl account list
 //	dariyactl key create --account ID [--principal ARN]
@@ -92,6 +93,8 @@ func main() {
 	switch os.Args[1] {
 	case "bootstrap":
 		err = cmdBootstrap(ctx, srv)
+	case "service-account":
+		err = cmdServiceAccount(ctx, srv, os.Args[2:])
 	case "account":
 		err = cmdAccount(ctx, srv, os.Args[2:])
 	case "key":
@@ -171,6 +174,73 @@ export DARIYA_SECRET_ACCESS_KEY=%s
 export DARIYA_REGION=%s
 export DARIYA_PRINCIPAL_ARN=%s
 `, id, acct.GetAccount().GetName(), id, k.GetAccessKeyId(), k.GetSecretAccessKey(), defaultRegion, k.GetPrincipalArn())
+	return nil
+}
+
+// cmdServiceAccount seeds the account a managed service runs its instances in (DESIGN.md
+// decision 13c), and prints the credentials its control plane signs with plus the line chala
+// needs in order to trust it (13i).
+//
+// Idempotent in the account, like bootstrap: re-running gives the same account and a fresh key.
+//
+// The policy is deliberately not bootstrap's "*". A managed service's control plane needs chala
+// and nothing else, and a policy scoped to exactly that is the difference between a compromised
+// cache control plane that can start containers in its own account and one that can also rewrite
+// its own IAM.
+func cmdServiceAccount(ctx context.Context, srv *plane, args []string) error {
+	fs := flag.NewFlagSet("service-account", flag.ExitOnError)
+	service := fs.String("service", "", "the service's ARN segment, e.g. nache")
+	_ = fs.Parse(args)
+	if *service == "" || *service == "chala" {
+		return fmt.Errorf("service-account: --service is required, and chala does not run on itself")
+	}
+
+	acct, err := srv.accounts.CreateAccount(ctx, &controlv1.CreateAccountRequest{
+		Name:        "svc-" + *service,
+		ClientToken: "dariyactl-service-" + *service,
+	})
+	if err != nil {
+		return err
+	}
+	id := acct.GetAccount().GetAccountId()
+
+	created, err := srv.policies.CreatePolicy(ctx, &iamv1.CreatePolicyRequest{
+		AccountId: id,
+		Name:      "run-on-chala",
+		Document: &iamv1.PolicyDocument{Statements: []*iamv1.Statement{{
+			Sid:       "own-instances-only",
+			Effect:    iamv1.Effect_EFFECT_ALLOW,
+			Actions:   []string{"chala:*"},
+			Resources: []string{fmt.Sprintf("arn:dariya:chala:%s:%s:*", defaultRegion, id)},
+		}}},
+		ClientToken: "dariyactl-service-" + *service + "-policy",
+	})
+	if err != nil {
+		return err
+	}
+	principal := fmt.Sprintf("arn:dariya:iam:%s:%s:user/root", defaultRegion, id)
+	if _, err := srv.policies.AttachPolicy(ctx, &iamv1.AttachPolicyRequest{
+		PolicyArn: created.GetPolicy().GetPolicyArn(), PrincipalArn: principal,
+	}); err != nil {
+		return err
+	}
+
+	key, err := srv.accounts.CreateAccessKey(ctx, &controlv1.CreateAccessKeyRequest{AccountId: id})
+	if err != nil {
+		return err
+	}
+	k := key.GetAccessKey()
+
+	upper := strings.ToUpper(*service)
+	fmt.Printf(`# service account for %s: %s (%s)
+# The control plane signs with these. chala must be started with DARIYA_SERVICE_ACCOUNTS
+# including %s=%s, or every attach is refused.
+export %s_ACCOUNT_ID=%s
+export %s_ACCESS_KEY_ID=%s
+export %s_SECRET_ACCESS_KEY=%s
+export DARIYA_SERVICE_ACCOUNTS=%s=%s
+`, *service, id, acct.GetAccount().GetName(), id, *service,
+		upper, id, upper, k.GetAccessKeyId(), upper, k.GetSecretAccessKey(), id, *service)
 	return nil
 }
 

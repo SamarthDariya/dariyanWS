@@ -217,6 +217,21 @@ func (c *Client) EnsureNetwork(ctx context.Context, spec NetworkSpec) error {
 	return err
 }
 
+// ConnectNetwork attaches an existing container to a second network, under the given DNS aliases.
+// Connecting a container that is already on the network is not an error, so a half-finished
+// attach can be retried to completion.
+func (c *Client) ConnectNetwork(ctx context.Context, network, containerID string, aliases []string) error {
+	_, err := c.do(ctx, "POST", "/networks/"+network+"/connect", nil, map[string]any{
+		"Container":      containerID,
+		"EndpointConfig": map[string]any{"Aliases": aliases},
+	}, nil)
+	var e *Error
+	if errors.As(err, &e) && e.Status == http.StatusForbidden && strings.Contains(e.Message, "already exists") {
+		return nil
+	}
+	return err
+}
+
 // RemoveNetwork deletes a network that has no containers left on it. chala does not call it yet —
 // an account network outlives its instances, and nothing deletes accounts — so today it is only
 // what tests clean up with.

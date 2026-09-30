@@ -89,6 +89,17 @@ The instance is reachable only from its account's network, at
 `client-1.<account>.chala.dariya.internal`. On macOS the host cannot reach that network at all —
 that is decision 13d working, not a bug.
 
+A managed service runs its instances in its own account and attaches them to the customer's
+network (decision 13i). Seed that account, then start chala trusting it:
+
+```sh
+eval "$(go run ./cmd/dariyactl service-account --service nache)"
+./bin/chala --dev &
+```
+
+`service-account` exports `DARIYA_SERVICE_ACCOUNTS`, which is how chala learns which accounts may
+attach across tenants. Without it, every attach is an `AccessDenied`.
+
 Credentials are encrypted at rest under `DARIYA_MASTER_KEYS`, not hashed — verifying a signature
 means recomputing an HMAC, which needs the secret back. `make dev-keys` prints **new** keys every
 run; export them once and keep them, or previously minted credentials stop decrypting and tokens

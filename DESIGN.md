@@ -347,7 +347,8 @@ plane per service that drives it, and a way for resources to reach each other. `
 behind it: a cache is the smallest possible managed resource (one process, one port, no fan-out),
 which makes it the cheapest place to get the first two right.
 
-Eight sub-decisions, taken in this order, each one constraining the next.
+Eight sub-decisions, taken in this order, each one constraining the next — and a ninth, 13i,
+forced when the code for 13d found that 13c had promised something 13d could not keep.
 
 **13a. The substrate is the Docker Engine API, and instances are isolated.** Each instance is a
 container with its own network attachment, killable on its own, with a real "it died". *Rejected: a
@@ -425,6 +426,40 @@ replication. A client that resolves once and caches the address forever will not
 replacement; that is written down as the client's problem. *Rejected: the container IP* — it
 changes on replacement, which makes the reconciler's recovery true for the system and false for
 every client.
+
+**13i (M7.4). Attaching into a customer's network is the one cross-account act, and chala's
+configuration authorizes it — not the customer.** Found while building 13d, and it contradicts
+13c as first written: 13c promised the cache control plane would only ever make same-account
+calls, but putting its instance on *the customer's* network is a cross-account act by definition.
+The two decisions were locked one after the other and the conflict was not seen until the code
+for the second needed an answer.
+
+So: chala is started with `DARIYA_SERVICE_ACCOUNTS=<account>=<service>` pairs. Only those
+accounts may set `attach_account_id` on `RunInstance`; for anyone else it is an `AccessDenied`,
+which is what stops a tenant attaching its own instance into another tenant's network. A service
+may name its instance on the attached network only as `<label>.<customer>.<service>.dariya.internal`
+— its own namespace, in the one account it is attaching to — so `nache` cannot claim a chala
+instance name, another service's name, or a name in a different customer's zone. `chala` itself
+may not be configured as a service. The attached instance stays owned by and listed in the service
+account: the customer reaches it and never sees it, which is 13c's promise kept.
+
+*Rejected: forward the customer's capability to chala as proof of consent.* It looks like the
+principled answer and it does not survive decision 13g. A capability lives thirty seconds; the
+reconciler replaces a dead node next week, when there is no customer request in flight and nothing
+to forward. Consent that has to be re-presented on every attach cannot be given once at
+`CreateCacheCluster` time.
+
+**The residue, stated:** the attach is authorized by trust in the service's control plane, not by
+anything the customer signed. A bug in `nache` that attached a node to the wrong customer would
+expose one customer's cache to another, and chala could not tell. The account on a cluster's row
+comes from the verified capability that created it, so the fix is that `nache` must never take an
+attach account from anywhere else — a rule M8 has to make structural rather than remembered. AWS
+has the same shape: a service-linked role is trust in the service, granted once. Real delegation —
+a grant the customer holds and can revoke — is still deferred to `dariyafunc`'s execution role.
+
+`dariyactl service-account --service nache` seeds the account, with a policy of `chala:*` on its own
+account and nothing else, not bootstrap's `*`. A compromised cache control plane can then start
+containers in its own account, but cannot rewrite its own IAM.
 
 **What this adds to `BREAK.md`:** E5, the orphan. `kill -9` the `nache` process between
 `RunInstance` and the row update, predict first, then measure how long until the reconciler adopts

@@ -78,6 +78,14 @@ message Instance {
   string private_ip = 9;
 
   int64 created_at_unix_ms = 10;
+
+  // Set only on an instance a service account attached to a customer's network (DESIGN.md
+  // decision 13i). The instance is still owned by, and listed in, the service account; the
+  // customer never sees it, only reaches it — at attached_private_ip, or better, at one of the
+  // aliases, which survive the instance being replaced.
+  string attached_account_id = 11;
+  string attached_private_ip = 12;
+  repeated string attached_dns_aliases = 13;
 }
 
 // The AMI analogue. chala runs only what is in its catalog, so a caller cannot choose a registry
@@ -92,6 +100,18 @@ message RunInstanceRequest {
   string name = 1;
   string image_id = 2;
   map<string, string> tags = 3;
+
+  // Also attach the instance to this account's network — the ENI-into-your-VPC analogue
+  // (decisions 13d, 13i). Refused unless the caller's account is one chala was configured to
+  // trust as a service account. It is the one cross-account act in chala, and it is authorized
+  // by that configuration rather than by the customer, which is the limit of decision 13c.
+  string attach_account_id = 4;
+
+  // DNS names for the instance on the attached network. Each must be
+  // <label>.<attach_account_id>.<service>.dariya.internal, where <service> is the caller's own
+  // service segment, so a service can name things only inside its own namespace in the account it
+  // serves. At most 4. Requires attach_account_id.
+  repeated string attach_dns_aliases = 5;
 }
 message RunInstanceResponse { Instance instance = 1; }
 

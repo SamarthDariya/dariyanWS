@@ -19,6 +19,11 @@ const (
 	labelImage    = "dariya.image"
 	labelTag      = "dariya.tag."
 
+	// What a service account attached the instance to (decision 13i), kept on the container so
+	// that a retried RunInstance can tell the same request from a different one.
+	labelAttachAccount = "dariya.attach.account"
+	labelAttachAliases = "dariya.attach.aliases"
+
 	kindInstance = "instance"
 	kindNetwork  = "network"
 
@@ -27,12 +32,14 @@ const (
 
 	maxTags        = 16
 	maxTagValueLen = 255
+	maxAliases     = 4
 )
 
 var (
 	// A DNS label, because the name becomes one.
 	instanceName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	tagKey       = regexp.MustCompile(`^[A-Za-z0-9._-]{1,63}$`)
+	accountID    = regexp.MustCompile(`^[0-9]{12}$`)
 )
 
 func validateName(name string) error {
@@ -104,4 +111,41 @@ func tagsFrom(labels map[string]string) map[string]string {
 // capability; there is no listing that is not scoped by it.
 func accountFilter(account string) []string {
 	return []string{labelKind + "=" + kindInstance, labelAccount + "=" + account}
+}
+
+// validateAttach checks the one cross-account request chala accepts (DESIGN.md decision 13i).
+//
+// service is the caller's service segment, known only because chala was configured with it — an
+// empty one means the caller is not a service account and may not attach at all. The alias rule
+// confines a service to naming things inside its own namespace, in the one account it is
+// attaching to: nache cannot claim a chala instance name, another service's name, or a name in
+// a different customer's zone.
+func validateAttach(caller, service, attach string, aliases []string) error {
+	if attach == "" {
+		if len(aliases) > 0 {
+			return apierr.Validation("attachDnsAliases needs attachAccountId")
+		}
+		return nil
+	}
+	if service == "" {
+		return &apierr.Error{Code: apierr.CodeAccessDenied,
+			Message: "only a service account may attach an instance to another account's network"}
+	}
+	if !accountID.MatchString(attach) {
+		return apierr.Validation("attachAccountId is twelve digits: %q", attach)
+	}
+	if attach == caller {
+		return apierr.Validation("an instance is already on its own account's network")
+	}
+	if len(aliases) > maxAliases {
+		return apierr.Validation("at most %d aliases, got %d", maxAliases, len(aliases))
+	}
+	suffix := fmt.Sprintf(".%s.%s.dariya.internal", attach, service)
+	for _, a := range aliases {
+		label, ok := strings.CutSuffix(a, suffix)
+		if !ok || !instanceName.MatchString(label) {
+			return apierr.Validation("an alias is <label>%s, with a DNS label: %q", suffix, a)
+		}
+	}
+	return nil
 }

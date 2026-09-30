@@ -56,6 +56,13 @@ type Config struct {
 	// MaxInstancesPerAccount bounds what one tenant can start. The region is one laptop.
 	MaxInstancesPerAccount int
 
+	// ServiceAccounts maps an account id to the service segment it runs as ("nache"). Only these
+	// accounts may attach an instance to another account's network (decision 13i). It is
+	// configuration, not policy, on purpose: it names which control planes the region trusts to
+	// act across tenants, and that is an operator's decision, not something a policy in one of
+	// those tenants could grant.
+	ServiceAccounts map[string]string
+
 	Dev bool
 	Log *slog.Logger
 }
@@ -71,6 +78,14 @@ func New(d *docker.Client, guard *servicekit.Guard, cfg Config) (*Server, error)
 	cat, err := newCatalog(cfg.Catalog)
 	if err != nil {
 		return nil, err
+	}
+	for acct, svc := range cfg.ServiceAccounts {
+		// A service account configured as chala could claim chala's own instance names on any
+		// account's network, which is every other tenant's DNS.
+		if !accountID.MatchString(acct) || !instanceName.MatchString(svc) || svc == Service {
+			return nil, fmt.Errorf("chala: service account %q=%q is not <12 digits>=<service>, "+
+				"and the service may not be chala", acct, svc)
+		}
 	}
 	if cfg.MaxInstancesPerAccount <= 0 {
 		cfg.MaxInstancesPerAccount = 20
@@ -136,6 +151,11 @@ func (s *Server) runInstance(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	if err := validateAttach(account, s.cfg.ServiceAccounts[account],
+		req.GetAttachAccountId(), req.GetAttachDnsAliases()); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 
 	ctx := r.Context()
 	cname := containerName(account, name)
@@ -176,10 +196,16 @@ func (s *Server) runInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	labels := instanceLabels(account, name, img.ID, req.GetTags())
+	if attach := req.GetAttachAccountId(); attach != "" {
+		labels[labelAttachAccount] = attach
+		labels[labelAttachAliases] = strings.Join(req.GetAttachDnsAliases(), ",")
+	}
+
 	id, err := s.docker.CreateContainer(ctx, cname, docker.ContainerSpec{
 		Image:       img.Ref,
 		Cmd:         img.Cmd,
-		Labels:      instanceLabels(account, name, img.ID, req.GetTags()),
+		Labels:      labels,
 		Network:     net,
 		Aliases:     []string{DNSName(account, name)},
 		MemoryBytes: img.MemoryBytes,
@@ -200,28 +226,64 @@ func (s *Server) runInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.docker.StartContainer(ctx, id); err != nil {
-		// The container exists and is PENDING. A retry of the same PUT starts it, which is why a
-		// half-finished RunInstance needs no cleanup of its own.
-		s.fail(w, r, apierr.Internal(err, "the instance was created but did not start"))
+	// Everything after create is finish(), shared with the retry path, so a RunInstance that dies
+	// at any step leaves something the same PUT completes rather than something to clean up.
+	c, err := s.docker.InspectContainer(ctx, id)
+	if err != nil {
+		s.fail(w, r, apierr.Internal(err, "the instance was created but could not be described"))
+		return
+	}
+	if err := s.finish(ctx, c, &req); err != nil {
+		s.fail(w, r, err)
 		return
 	}
 	s.respondWith(w, r, http.StatusOK, id)
 }
 
+// finish brings a created container to the state the request asked for: attached where it
+// should be, then started. Each step is safe to repeat.
+//
+// The attach happens BEFORE the start, so an instance is never running and reachable from its own
+// network while not yet reachable where its caller needs it. That order matters to the reconciler:
+// RUNNING has to mean "done", or it would have to check the network separately.
+func (s *Server) finish(ctx context.Context, c *docker.Container, req *chalav1.RunInstanceRequest) error {
+	if attach := req.GetAttachAccountId(); attach != "" {
+		net := NetworkName(attach)
+		if _, on := c.Networks[net]; !on {
+			if err := s.docker.EnsureNetwork(ctx, docker.NetworkSpec{
+				Name:     net,
+				Labels:   map[string]string{labelKind: kindNetwork, labelAccount: attach},
+				Internal: true,
+			}); err != nil {
+				return apierr.Internal(err, "could not prepare the attached account's network")
+			}
+			if err := s.docker.ConnectNetwork(ctx, net, c.ID, req.GetAttachDnsAliases()); err != nil {
+				return apierr.Internal(err, "the instance was created but could not be attached")
+			}
+		}
+	}
+	if c.Status == "created" {
+		if err := s.docker.StartContainer(ctx, c.ID); err != nil {
+			// PENDING. A retry of the same PUT starts it.
+			return apierr.Internal(err, "the instance was created but did not start")
+		}
+	}
+	return nil
+}
+
 // adopt answers a RunInstance for a name that already exists. Same image and tags: it is the same
 // request, and it is finished if needed. Anything else is a different request reusing the name.
 func (s *Server) adopt(w http.ResponseWriter, r *http.Request, c *docker.Container, req *chalav1.RunInstanceRequest) {
-	if c.Labels[labelImage] != req.GetImageId() || !sameTags(tagsFrom(c.Labels), req.GetTags()) {
+	if c.Labels[labelImage] != req.GetImageId() || !sameTags(tagsFrom(c.Labels), req.GetTags()) ||
+		c.Labels[labelAttachAccount] != req.GetAttachAccountId() ||
+		c.Labels[labelAttachAliases] != strings.Join(req.GetAttachDnsAliases(), ",") {
 		s.fail(w, r, &apierr.Error{Code: apierr.CodeIdempotencyMis, Message: fmt.Sprintf(
-			"instance %q exists with a different image or tags", req.GetName())})
+			"instance %q exists with a different image, tags or attachment", req.GetName())})
 		return
 	}
-	if c.Status == "created" {
-		if err := s.docker.StartContainer(r.Context(), c.ID); err != nil {
-			s.fail(w, r, apierr.Internal(err, "the instance exists but did not start"))
-			return
-		}
+	if err := s.finish(r.Context(), c, req); err != nil {
+		s.fail(w, r, err)
+		return
 	}
 	s.respondWith(w, r, http.StatusOK, c.ID)
 }
@@ -373,17 +435,29 @@ func (s *Server) respondWith(w http.ResponseWriter, r *http.Request, status int,
 
 func (s *Server) instance(c *docker.Container) *chalav1.Instance {
 	account, name := c.Labels[labelAccount], c.Labels[labelInstance]
+	var aliases []string
+	if a := c.Labels[labelAttachAliases]; a != "" {
+		aliases = strings.Split(a, ",")
+	}
+	attach := c.Labels[labelAttachAccount]
+	var attachedIP string
+	if attach != "" {
+		attachedIP = c.Networks[NetworkName(attach)]
+	}
 	return &chalav1.Instance{
-		Name:            name,
-		Arn:             ARN(s.cfg.Region, account, name),
-		AccountId:       account,
-		ImageId:         c.Labels[labelImage],
-		State:           state(c.Status),
-		ExitCode:        int32(c.ExitCode),
-		Tags:            tagsFrom(c.Labels),
-		PrivateDnsName:  DNSName(account, name),
-		PrivateIp:       c.Networks[NetworkName(account)],
-		CreatedAtUnixMs: c.Created.UnixMilli(),
+		AttachedAccountId:  attach,
+		AttachedPrivateIp:  attachedIP,
+		AttachedDnsAliases: aliases,
+		Name:               name,
+		Arn:                ARN(s.cfg.Region, account, name),
+		AccountId:          account,
+		ImageId:            c.Labels[labelImage],
+		State:              state(c.Status),
+		ExitCode:           int32(c.ExitCode),
+		Tags:               tagsFrom(c.Labels),
+		PrivateDnsName:     DNSName(account, name),
+		PrivateIp:          c.Networks[NetworkName(account)],
+		CreatedAtUnixMs:    c.Created.UnixMilli(),
 	}
 }
 

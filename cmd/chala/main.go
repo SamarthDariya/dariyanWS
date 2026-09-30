@@ -10,10 +10,12 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,6 +32,11 @@ func main() {
 		socket = flag.String("socket", docker.DefaultSocket(), "Docker daemon socket")
 		max    = flag.Int("max-instances", 20, "instances one account may have at once")
 		dev    = flag.Bool("dev", os.Getenv("DARIYA_DEV") == "1", "development mode")
+
+		// Which control planes the region trusts to attach instances to other accounts' networks
+		// (DESIGN.md decision 13i). Printed by `dariyactl service-account`.
+		services = flag.String("service-accounts", os.Getenv("DARIYA_SERVICE_ACCOUNTS"),
+			"comma-separated ACCOUNT=SERVICE pairs, e.g. 123456789012=nache")
 	)
 	flag.Parse()
 
@@ -37,13 +44,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, *addr, *region, *socket, *max, *dev, log); err != nil {
+	serviceAccounts, err := parseServiceAccounts(*services)
+	if err != nil {
+		log.Error("cannot start", "error", err)
+		os.Exit(2)
+	}
+
+	if err := run(ctx, *addr, *region, *socket, *max, serviceAccounts, *dev, log); err != nil {
 		log.Error("chala stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, addr, region, socket string, max int, dev bool, log *slog.Logger) error {
+func run(ctx context.Context, addr, region, socket string, max int, serviceAccounts map[string]string, dev bool, log *slog.Logger) error {
 	// Public keys only. chala verifies capabilities and cannot mint them (decision 6).
 	verifier, err := capability.NewVerifierFromEnv()
 	if err != nil {
@@ -59,7 +72,7 @@ func run(ctx context.Context, addr, region, socket string, max int, dev bool, lo
 
 	s, err := chala.New(d, servicekit.NewGuard(verifier, chala.Service, region), chala.Config{
 		Region: region, Catalog: chala.DefaultCatalog(), MaxInstancesPerAccount: max,
-		Dev: dev, Log: log,
+		ServiceAccounts: serviceAccounts, Dev: dev, Log: log,
 	})
 	if err != nil {
 		return err
@@ -86,11 +99,33 @@ func run(ctx context.Context, addr, region, socket string, max int, dev bool, lo
 		_ = srv.Shutdown(shutdown)
 	}()
 
-	log.Info("chala listening", "addr", addr, "socket", socket, "max_instances", max)
+	log.Info("chala listening", "addr", addr, "socket", socket, "max_instances", max,
+		"service_accounts", len(serviceAccounts))
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// parseServiceAccounts reads ACCOUNT=SERVICE pairs. chala.New validates the values; this only
+// refuses what cannot be split.
+func parseServiceAccounts(raw string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		acct, svc, ok := strings.Cut(pair, "=")
+		if !ok {
+			return nil, fmt.Errorf("--service-accounts: %q is not ACCOUNT=SERVICE", pair)
+		}
+		if _, dup := out[acct]; dup {
+			return nil, fmt.Errorf("--service-accounts: %s appears twice", acct)
+		}
+		out[acct] = svc
+	}
+	return out, nil
 }
 
 func envOr(key, fallback string) string {

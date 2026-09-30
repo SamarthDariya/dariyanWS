@@ -50,6 +50,11 @@ func testAccount(t *testing.T) string {
 
 func newHarness(t *testing.T, maxInstances int, accounts ...string) *harness {
 	t.Helper()
+	return newHarnessWith(t, Config{MaxInstancesPerAccount: maxInstances}, accounts...)
+}
+
+func newHarnessWith(t *testing.T, cfg Config, accounts ...string) *harness {
+	t.Helper()
 	d := docker.New(docker.DefaultSocket())
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -67,10 +72,11 @@ func newHarness(t *testing.T, maxInstances int, accounts ...string) *harness {
 	}
 	verifier := capability.NewVerifier(map[string]ed25519.PublicKey{"k1": pub}, time.Now)
 
-	s, err := New(d, servicekit.NewGuard(verifier, Service, region), Config{
-		Region: region, Catalog: DefaultCatalog(), MaxInstancesPerAccount: maxInstances,
-		Log: discardLog(),
-	})
+	cfg.Region, cfg.Log = region, discardLog()
+	if cfg.Catalog == nil {
+		cfg.Catalog = DefaultCatalog()
+	}
+	s, err := New(d, servicekit.NewGuard(verifier, Service, region), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,11 +89,15 @@ func newHarness(t *testing.T, maxInstances int, accounts ...string) *harness {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// Every container before any network: an attached instance sits on another account's
+		// network, which cannot be removed while it is there.
 		for _, acct := range accounts {
 			ids, _ := d.ListContainers(ctx, []string{labelAccount + "=" + acct})
 			for _, id := range ids {
 				_ = d.RemoveContainer(ctx, id)
 			}
+		}
+		for _, acct := range accounts {
 			_ = d.RemoveNetwork(ctx, NetworkName(acct))
 		}
 	})
