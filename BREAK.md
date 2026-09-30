@@ -435,6 +435,34 @@ kinds of safety by some distance.
 
 ---
 
+## E5 — The orphan
+
+**The claim** (DESIGN.md decision 13g): a level-triggered reconciler makes a crash in the middle of
+provisioning a non-event. Nothing leaks, nothing is duplicated, and the cluster converges within
+one loop period without anyone noticing it happened.
+
+**Setup (M9):** create a cache cluster, and `kill -9` the `nache` process after chala has started
+the instance but before the cluster's row records it. Restart `nache`. Measure, from the kill:
+
+1. time until the orphaned instance is adopted (or terminated) — the system's number;
+2. time a client instance looping `PING` against the cluster's DNS endpoint sees no answer — the
+   client's number;
+3. the count of instances tagged for the cluster at every point in between. Anything above one is
+   a duplicate, and the claim fails.
+
+Then run it a second time with an "instance exited" hint waking the loop early, and measure how
+much of the gap that closes.
+
+**Predicted — Samarth:**
+
+**Predicted — Claude:**
+
+**Measured:**
+
+**Wrong about:**
+
+---
+
 ## The standing question
 
 DESIGN.md decision 9 is reserved for what the second service forces the contract to change.

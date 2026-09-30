@@ -65,6 +65,12 @@ services into one central process moves the good parts of six projects into this
 
 The design is not wasted. See decision 8.
 
+**Amendment (2026-09-30), decision 13f.** "Each service in its own repo" becomes "each service
+*graduates* to its own repo once its API stops moving". `chala` and `nache` start here, under a
+test-enforced import boundary that keeps them from touching anything this repo's control plane
+owns. What decision 1 protects — each service owning its own store and its own control plane — is
+unchanged; only the repository it is committed to is deferred.
+
 ### 2. Everything enters through one front door.
 
 One endpoint. It authenticates, authorises, and proxies to the service that owns the resource.
@@ -314,6 +320,100 @@ Signing-key stores cannot, which is why AWS-style systems do the same thing.
 The master key comes from the environment for now. A real KMS-alike — key hierarchy, rotation,
 audit — is a service in its own right and is not being smuggled into M1.
 
+### 13. Managed services: a cache you create from the console, on machines nobody else can touch.
+
+Taken on 2026-09-30, after M6.3, and it reorders the plan. The console as built manages IAM and
+nothing else, because IAM is all that existed. The vision it was meant to serve is the AWS one:
+click *Create*, get a `dariyanache` or a `dariyakyu`, wire them together. That is the ElastiCache /
+MSK layer, and it needs three things that did not exist — something that starts machines, a control
+plane per service that drives it, and a way for resources to reach each other. `dariyafunc` moves
+behind it: a cache is the smallest possible managed resource (one process, one port, no fan-out),
+which makes it the cheapest place to get the first two right.
+
+Eight sub-decisions, taken in this order, each one constraining the next.
+
+**13a. The substrate is the Docker Engine API, and instances are isolated.** Each instance is a
+container with its own network attachment, killable on its own, with a real "it died". *Rejected: a
+fork/exec process supervisor* — simpler, no image build per service, and no isolation, with every
+port collision landing on the supervisor.
+
+**13b. One compute service, `dariyachala`, owns the Docker socket.** ARN segment `chala`, binary
+`cmd/chala`: `arn:dariya:chala:hind-1:<acct>:instance/<name>`. Service control planes are its
+*clients*, holding capabilities like any other caller. The socket is root-equivalent — whatever can
+create a container can mount `/` and read the Postgres volume and the master key — so exactly one
+process holds it, behind one narrow API. Same move as decision 1 and M4.4: a dangerous capability
+goes behind an interface that cannot express the dangerous thing. chala never sets a bind mount, a
+privileged flag, a capability add or a host network, and runs only images from its own catalog (the
+AMI analogue), so none of those are reachable through it. *Rejected: each control plane talks to
+Docker directly* — root in every service, and orphan cleanup, port assignment, network attachment
+and death detection each written once per service.
+
+**13c. A managed service's instances live in that service's own account.** `nache`'s control plane
+has a principal in a service-owned account and calls chala as an ordinary same-account caller. No
+new IAM mechanism, the cross-account refusal in `Authorize` stays absolute, and a customer cannot
+terminate the machine under their own cache. The console shows a cluster's *nodes* through
+`DescribeCacheCluster`, not the instances. *Rejected: instances in the customer's account* — it
+forces the cache control plane to call `RunInstance` **as the customer**, which is delegation, which
+is the confused-deputy problem, which this design has no answer to yet. It is deferred on purpose to
+`dariyafunc`'s execution role, where AWS has the same problem in the same place.
+
+**13d. One Docker network per account — a mini-VPC.** `dariya-acct-<account>`. A managed instance
+is multi-homed: onto its own service account's network and onto the customer's, which is the
+analogue of ElastiCache putting an ENI into your VPC. Tenant A's cache is unreachable from tenant
+B's network by construction — decision 4's "account in every storage key", applied to packets — and
+"connect X to Y" in the console gets a concrete meaning: same account, same network. **Accepted
+cost:** on macOS, Docker Desktop's bridge networks are inside a VM and the host cannot reach them,
+so clients run as instances too, and debugging from a terminal needs an explicit, opt-in bastion.
+*Rejected: published host ports* — isolation would then rest entirely on data-plane auth, and see
+13e for how much of that exists.
+
+**13e. Data-plane auth in v1 is network membership, and nothing else.** ElastiCache without AUTH:
+the account's network is the whole gate. It needs **zero changes to the `dariyanache` repo**, which
+is a track unit (3+4) and stays closed — the managed service runs its binary as an image. **Known
+gap:** any compromised container in an account owns every cache in that account. The later fix is
+IAM-issued connection tokens (`AUTH <short-lived Ed25519 token>` once per connection, verified
+offline exactly as decision 6), which touches the track repo and gets its own milestone. *Rejected:
+a static per-cluster AUTH password* — a second credential system, outside IAM, unscoped to a
+principal, and it ends up in environment variables.
+
+**13f. The new services live in this repo for now, behind an enforced import boundary.** `cmd/chala`
+and `cmd/nache`, following `cmd/echo`. Decision 1 is amended accordingly: a service *graduates* to
+its own repo once its API has stopped moving. What makes that honest rather than a monorepo by
+stealth is a test, not a comment: a service package may import only `servicekit`, `capability`,
+`httpx`, `apierr`, `arn` and `gen/`, never `store`, `iam`, `authz` or anything else the control
+plane owns. Graduating is then a mechanical move, because the boundary was already real. *Rejected:
+two new repos now* — the module is the bare name `dariyanws`, `servicekit` sits under `internal/`,
+and `gen/` is gitignored, so it would first need a "make this repo a library" milestone that is all
+plumbing and no cache.
+
+**13g. A managed resource converges through a level-triggered reconciler.** `CreateCacheCluster`
+writes `{cluster, desired_nodes, state: creating}` in one transaction and returns 202. A loop
+compares **desired** (the rows) with **actual** (chala's instances, found by tag) and closes the
+difference: create what is missing, adopt what is tagged for a live cluster, terminate what is
+tagged for a cluster that no longer exists, mark `available` once healthy. Creation, crash recovery,
+node death and deletion are one code path, not four. It is level-triggered — a timer enqueues every
+cluster, `reconcile(cluster)` sits behind a work queue — so an event that says "look now" can be
+added later as a pure hint that costs latency when missed, never correctness. *Rejected: synchronous
+create* — a crash between `RunInstance` and the row write leaks a container nothing points to, a
+client retry creates a second one, and a node dying next week is noticed by nobody. *Rejected:
+edge-triggered* — a dropped event is a cluster stuck forever, and the internal wire has had no
+streaming since the M5 amendment to decision 3.
+
+**13h. The endpoint is a stable DNS name, not an address.** chala registers each instance under an
+alias on the account network, e.g. `c-7f3a.nache.dariya.internal`, served by Docker's embedded DNS
+(which exists only on user-defined networks — 13d is what makes this available). A replacement node
+gets the same alias. Replacement order is **terminate the old, then start the new**: a short outage
+rather than two nodes answering one name, which is the right way round for a cache with no
+replication. A client that resolves once and caches the address forever will not follow a
+replacement; that is written down as the client's problem. *Rejected: the container IP* — it
+changes on replacement, which makes the reconciler's recovery true for the system and false for
+every client.
+
+**What this adds to `BREAK.md`:** E5, the orphan. `kill -9` the `nache` process between
+`RunInstance` and the row update, predict first, then measure how long until the reconciler adopts
+or removes the container, and how long a client looping `PING` against the endpoint is down. Run
+once level-triggered, then again with an "instance exited" hint.
+
 ---
 
 ## Part II — Consequences worth stating up front
@@ -339,7 +439,7 @@ service. Breadth is the goal; the contract surviving contact with two services i
 |---|---|---|
 | Contract | protobuf, codegen to Go/C++/TS | Only language-neutral option (decision 3) |
 | Edge wire | JSON/HTTP-1.1 + signing | curl-able, AWS-shaped |
-| Internal wire | gRPC | Typed, streaming, generated both languages |
+| Internal wire | JSON/HTTP-1.1, capability as a header | gRPC's C++ stack refused (decision 3, M5 amendment) |
 | Front door | **Go** | Control plane is CRUD + policy + integration |
 | Control-plane store | Postgres | Transactions for the state machine |
 | `dariyafunc` | Go | Process/container orchestration |
@@ -367,5 +467,9 @@ target.
 | M2 | Front door authn | HTTP server, canonical request, HMAC verify, clock skew, request IDs, error shape, **first benchmark** |
 | M3 | IAM | Policy documents, evaluation engine, attachment, `Authorize` RPC |
 | M4 | Capability tokens | Ed25519 mint/verify, token↔request matching, the skeleton-key test |
-| M5 | Routing | Service registry, gRPC proxy, echo service proving the path |
-| M6+ | `dariyafunc` | Separate repo, own design pass |
+| M5 | Routing | Route table, HTTP proxy, guarded echo service, E1 |
+| M6 | Console | Control plane over HTTP, session sign-in, React console |
+| M7 | `chala` (decision 13) | Import boundary, Docker Engine client, instances by name, image catalog, account networks + DNS aliases, service account |
+| M8 | `nache` | `CreateCacheCluster` → 202, Describe/Delete, the reconciler, the `dariyanache` image |
+| M9 | Console + E5 | Caches view polling `creating → available`, client instance, the orphan experiment |
+| M10+ | `dariyafunc`, connecting | Execution roles (delegation), event source mappings between managed resources |
