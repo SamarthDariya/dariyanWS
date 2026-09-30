@@ -28,6 +28,11 @@ var shared = []string{
 	module + "/internal/capability",
 	module + "/internal/httpx",
 	module + "/internal/servicekit",
+
+	// Added at M8.3, with its first in-service consumer: nache signs its calls to chala. It is
+	// the client half of decision 5, standard library only, and every service that calls another
+	// through the front door needs exactly this.
+	module + "/internal/signing",
 }
 
 // services maps each service to the directories that are its code. A service may import from its
