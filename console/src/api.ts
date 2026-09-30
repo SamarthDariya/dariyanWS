@@ -27,6 +27,12 @@ import {
   type PolicyDocument,
 } from "./gen/dariya/iam/v1/iam_pb";
 
+import {
+  CreateCacheClusterResponseSchema,
+  ListCacheClustersResponseSchema,
+  type CacheCluster,
+} from "./gen/dariya/nache/v1/nache_pb";
+
 const API = "/2026-09-01";
 
 /** What the server sends when something goes wrong. Mirrors commonv1.Error. */
@@ -62,6 +68,13 @@ interface RequestOptions {
 }
 
 async function request(path: string, opts: RequestOptions = {}): Promise<Response> {
+  return requestAt(API + path, opts);
+}
+
+/** requestAt is request() for a service other than the control plane: the same cookie, the same
+ *  CSRF rule, the same error shape. The front door authorizes a session the same way whatever
+ *  route it reaches (decision 12), so a managed service needs no console-specific path. */
+async function requestAt(url: string, opts: RequestOptions = {}): Promise<Response> {
   const method = opts.method ?? "GET";
   const headers: Record<string, string> = {};
 
@@ -73,7 +86,7 @@ async function request(path: string, opts: RequestOptions = {}): Promise<Respons
     headers["X-Dariya-Csrf"] = csrfToken;
   }
 
-  const resp = await fetch(API + path, {
+  const resp = await fetch(url, {
     method,
     headers,
     // Same-origin in dev via the Vite proxy, so the SameSite=Strict cookie is sent.
@@ -213,4 +226,28 @@ export async function detachPolicy(name: string, principalArn: string): Promise<
   });
 }
 
-export type { Account, AccessKey, Policy, PolicyDocument };
+// ---------------------------------------------------------------------------
+// Cache clusters (nache, decision 13)
+// ---------------------------------------------------------------------------
+
+const NACHE = "/nache/2026-09-30";
+
+export async function listCacheClusters(): Promise<CacheCluster[]> {
+  const page = await parse(await requestAt(`${NACHE}/clusters`), ListCacheClustersResponseSchema);
+  return page.clusters;
+}
+
+/** Answers at once with the cluster CREATING. The reconciler makes it real; poll to watch. */
+export async function createCacheCluster(name: string): Promise<CacheCluster> {
+  const resp = await requestAt(`${NACHE}/clusters/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body: {},
+  });
+  return (await parse(resp, CreateCacheClusterResponseSchema)).cluster!;
+}
+
+export async function deleteCacheCluster(name: string): Promise<void> {
+  await requestAt(`${NACHE}/clusters/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+
+export type { Account, AccessKey, Policy, PolicyDocument, CacheCluster };

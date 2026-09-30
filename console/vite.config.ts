@@ -15,6 +15,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/2026-09-01": { target: "http://127.0.0.1:8080", changeOrigin: false },
+      // Managed services live under their own prefix on the same front door.
+      "/nache": { target: "http://127.0.0.1:8080", changeOrigin: false },
     },
   },
 });

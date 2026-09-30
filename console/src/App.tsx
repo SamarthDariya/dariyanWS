@@ -3,10 +3,11 @@ import { useEffect, useState } from "react";
 import { ApiError, signOut, whoAmI } from "./api";
 import { Account } from "./views/Account";
 import { AccessKeys } from "./views/AccessKeys";
+import { Caches } from "./views/Caches";
 import { Policies } from "./views/Policies";
 import { SignIn } from "./views/SignIn";
 
-type Tab = "account" | "keys" | "policies";
+type Tab = "account" | "keys" | "policies" | "caches";
 
 interface Identity {
   accountId: string;
@@ -80,6 +81,7 @@ export function App() {
             ["account", "Account"],
             ["keys", "Access keys"],
             ["policies", "Policies"],
+            ["caches", "Caches"],
           ] as [Tab, string][]
         ).map(([id, label]) => (
           <button
@@ -94,6 +96,7 @@ export function App() {
 
       {tab === "account" && <Account principalArn={identity.principalArn} />}
       {tab === "keys" && <AccessKeys />}
+      {tab === "caches" && <Caches accountId={identity.accountId} />}
       {tab === "policies" && (
         <Policies accountId={identity.accountId} principalArn={identity.principalArn} />
       )}
